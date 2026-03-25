@@ -1,0 +1,48 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Weights / checkpoints
+*.pth
+*.pt
+*.bin
+checkpoints/
+models/
+
+# W&B
+wandb/
+retrieve/wandb/
+
+# Data
+data/
+datasets/
+raw_data/
+data_files/
+retrieve/data/
+retrieve/raw_data/
+retrieve/data_files/
+
+# Experiment outputs
+retrieve/chatdoctor5k_*/
+retrieve/cwq_*/
+retrieve/webqsp_*/
+
+# OS files
+.DS_Store
+Thumbs.db
