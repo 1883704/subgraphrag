@@ -63,6 +63,12 @@ python train.py -d webqsp
 ```
 where `D` should be a dataset mentioned in ["Supported Datasets"](#supported-datasets).
 
+To train the alternative TreeScorer path retriever, use:
+
+```bash
+python train_tree.py -d webqsp
+```
+
 For logged learning curves, go to the corresponding Wandb interface. 
 
 Once trained, there will be a folder in the current directory of the form `{dataset}_{time}` (e.g., `webqsp_Nov08-01:14:47/`) that stores the trained model checkpoint `cpt.pth`.
@@ -73,6 +79,8 @@ Once trained, there will be a folder in the current directory of the form `{data
 python inference.py -p P
 ```
 where `P` is the path to a saved model checkpoint. The predicted retrieval result will be stored in the same folder as the model checkpoint. For example, if `P` is `webqsp_Nov08-01:14:47/cpt.pth`, then the retrieval result will be saved as `webqsp_Nov08-01:14:47/retrieval_result.pth`.
+
+`inference.py` also accepts checkpoints created by `train_tree.py`. TreeScorer scores root-to-leaf paths and aggregates the path scores back to ranked triples, producing the same `retrieval_result.pth` format as the default retriever.
 
 ### Evaluation
 

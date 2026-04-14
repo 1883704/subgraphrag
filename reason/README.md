@@ -44,6 +44,12 @@ python main.py -d webqsp --prompt_mode scored_100 -p P
 ```
 where `P` is the path to the retrieval results obtained from retrieval inference, e.g., `../retrieve/webqsp_Nov08-01:14:47/retrieval_result.pth`.
 
+For TreeScorer reasoning-tree results, use a tree prompt mode and point `-p` to the generated tree result:
+
+```
+python main.py -d webqsp --prompt_mode tree_5 -p ../retrieve/webqsp_tree_Nov08-01-14-47/tree_retrieval_result.jsonl
+```
+
 ### Config
 
 Our used config for each dataset can be found in `./config`.

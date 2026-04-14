@@ -5,7 +5,7 @@ env:
   seed: 42
 
 dataset:
-  name: 'cwq'
+  name: 'webqsp'
   text_encoder_name: 'gte-large-en-v1.5'
 
 treescorer:
@@ -31,4 +31,4 @@ train:
   num_epochs: 20
   patience: 3
   batch_size: 8
-  save_prefix: 'cwq_tree'
+  save_prefix: 'webqsp_tree'

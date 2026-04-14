@@ -256,18 +256,20 @@ def eval_results(predict_file, cal_f1=True, split=None, subset=False, bad_sample
         raise NotImplementedError
     pred_file_path = f"./results/KGQA/{dataset_name}/RoG/test/results_gen_rule_path_RoG-{dataset_name}_RoG_test_predictions_3_False_jsonl/predictions.jsonl"
     prompt_mode = predict_file.split('/')[-1].split('-')[0]
-    triplets = get_data(dataset_name, pred_file_path, samples_to_eval_path, 'test', prompt_mode)
-    triplets_dict = {}
-    # To evaluate the hal score, we need the retrieved triplets for each question
-    for each in triplets:
-        if split == '\n':
-            # RoG
-            triplets_dict[each['id']] = each['good_triplets_rog']
-        else:
-            input_triplets = [(triplet[0], triplet[1], triplet[2]) for triplet in each['scored_triplets']]
-            triplets_dict[each['id']] = unique_preserve_order(input_triplets)[:int(prompt_mode.split('_')[-1])]
-
     samples_to_eval = torch.load(samples_to_eval_path, weights_only=False)
+    triplets_dict = {}
+    if 'tree' in prompt_mode:
+        triplets_dict = {sample_id: [] for sample_id in samples_to_eval}
+    else:
+        triplets = get_data(dataset_name, pred_file_path, samples_to_eval_path, 'test', prompt_mode)
+        # To evaluate the hal score, we need the retrieved triplets for each question
+        for each in triplets:
+            if split == '\n':
+                # RoG
+                triplets_dict[each['id']] = each['good_triplets_rog']
+            else:
+                input_triplets = [(triplet[0], triplet[1], triplet[2]) for triplet in each['scored_triplets']]
+                triplets_dict[each['id']] = unique_preserve_order(input_triplets)[:int(prompt_mode.split('_')[-1])]
 
     # if not subset and not bad_samples:
     #     subgraph_dict = get_subgraph_dict(dataset_name)

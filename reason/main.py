@@ -123,7 +123,9 @@ def main():
     run = wandb.init(project=f"RAG-{dataset_name}", name=run_name, config=args)
 
     if args.score_dict_path is None:
-        if dataset_name == "webqsp":
+        if "tree" in prompt_mode:
+            raise ValueError("Tree prompt modes require -p/--score_dict_path to point to tree_retrieval_result.jsonl or .pth")
+        elif dataset_name == "webqsp":
             assert split == "test"
             score_dict_path = "./scored_triples/webqsp_240912_unidir_test.pth"
         elif dataset_name == "cwq":
@@ -148,7 +150,8 @@ def main():
         for idx, each_qa in enumerate(tqdm(data[start_idx:], initial=start_idx, total=len(data))):
             res = llm_inf_all(llm, each_qa, llm_mode, model_name)
 
-            del each_qa["graph"], each_qa["good_paths_rog"], each_qa["good_triplets_rog"], each_qa["scored_triplets"]
+            for key in ["graph", "good_paths_rog", "good_triplets_rog", "scored_triplets", "scored_trees"]:
+                each_qa.pop(key, None)
 
             each_qa["prediction"] = res[0]
             save_checkpoint(pred_file, each_qa)

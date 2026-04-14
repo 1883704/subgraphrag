@@ -1,6 +1,7 @@
 import os
 import torch
 import networkx as nx
+from collections import deque
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
@@ -13,12 +14,15 @@ class TreeScorerDataset(Dataset):
         raw_samples,
         emb_dict,
         max_hops=3,
+        max_paths_per_root=200,
+        max_paths_per_sample=1000,
+        add_reverse_edges=True,
         mode="train",
         max_neg_per_pos=20,
         max_neg_per_sample=80,
         cache_path=None,
         use_cache=True,
-        cache_version="v1",
+        cache_version="v3",
     ):
         """
         mode: "train" 时对每个问题做负样本下采样；"eval" / "test" 时不过采样
@@ -27,6 +31,9 @@ class TreeScorerDataset(Dataset):
         """
         self.emb_dict = emb_dict
         self.max_hops = max_hops
+        self.max_paths_per_root = max_paths_per_root
+        self.max_paths_per_sample = max_paths_per_sample
+        self.add_reverse_edges = add_reverse_edges
         self.mode = mode
         self.max_neg_per_pos = max_neg_per_pos
         self.max_neg_per_sample = max_neg_per_sample
@@ -48,6 +55,9 @@ class TreeScorerDataset(Dataset):
     def _cache_config(self):
         return {
             "max_hops": self.max_hops,
+            "max_paths_per_root": self.max_paths_per_root,
+            "max_paths_per_sample": self.max_paths_per_sample,
+            "add_reverse_edges": self.add_reverse_edges,
             "mode": self.mode,
             "max_neg_per_pos": self.max_neg_per_pos,
             "max_neg_per_sample": self.max_neg_per_sample,
@@ -111,6 +121,13 @@ class TreeScorerDataset(Dataset):
             local_ent_embs = sample_embs["entity_embs"].cpu()
             local_rel_embs = sample_embs["relation_embs"].cpu()
 
+            num_entities = len(sample.get("text_entity_list", [])) + len(
+                sample.get("non_text_entity_list", [])
+            )
+            local_ent_embs = self._pad_non_text_entity_embs(
+                local_ent_embs, num_entities, q_emb.shape[-1]
+            )
+
             # 2) 构建 NetworkX 图
             nx_g = self._build_nx_graph(sample)
 
@@ -125,27 +142,29 @@ class TreeScorerDataset(Dataset):
                 if root_id not in nx_g:
                     continue
 
-                try:
-                    paths = nx.single_source_shortest_path(
-                        nx_g, root_id, cutoff=self.max_hops
-                    )
-                except Exception:
-                    continue
+                remaining_budget = self.max_paths_per_sample - len(pos_list) - len(neg_list)
+                if remaining_budget <= 0:
+                    break
 
-                for leaf_id, path_nodes in paths.items():
-                    # 跳过 trivial path（只有 root 自己）
-                    if leaf_id == root_id and len(path_nodes) == 1:
-                        continue
+                path_records = self._enumerate_paths_from_root(
+                    nx_g,
+                    root_id,
+                    max_paths=min(self.max_paths_per_root, remaining_budget),
+                )
+
+                for leaf_id, path_nodes, edge_r_ids, triple_ids in path_records:
 
                     tree_data = self._path_to_pyg_data(
-                        nx_g,
                         path_nodes,
+                        edge_r_ids,
+                        triple_ids,
                         root_id,
                         leaf_id,
                         ans_ids,
                         q_emb,
                         local_ent_embs,
                         local_rel_embs,
+                        sample_idx,
                     )
                     if tree_data is None:
                         continue
@@ -225,19 +244,94 @@ class TreeScorerDataset(Dataset):
         r_list = sample["r_id_list"]
         # 这里假设 h_list 里的 id 已经是对应 local_ent_embs 的索引
         for i in range(len(h_list)):
-            g.add_edge(h_list[i], t_list[i], r_id=r_list[i])
+            g.add_edge(
+                h_list[i],
+                t_list[i],
+                key=f"f_{i}",
+                r_id=r_list[i],
+                triple_id=i,
+                direction=1,
+            )
+            if self.add_reverse_edges:
+                g.add_edge(
+                    t_list[i],
+                    h_list[i],
+                    key=f"r_{i}",
+                    r_id=r_list[i],
+                    triple_id=i,
+                    direction=-1,
+                )
         return g
+
+    def _enumerate_paths_from_root(self, nx_g, root_id, max_paths):
+        path_records = []
+        queue = deque([(root_id, [root_id], [], [])])
+
+        while queue and len(path_records) < max_paths:
+            cur_node, node_path, rel_path, triple_path = queue.popleft()
+            if len(rel_path) >= self.max_hops:
+                continue
+
+            out_edges = list(nx_g.out_edges(cur_node, keys=True, data=True))
+            out_edges.sort(
+                key=lambda edge: (
+                    edge[3]["triple_id"],
+                    -edge[3]["direction"],
+                    edge[1],
+                )
+            )
+
+            for _, next_node, _, edge_data in out_edges:
+                if next_node in node_path:
+                    continue
+
+                next_node_path = node_path + [next_node]
+                next_rel_path = rel_path + [edge_data["r_id"]]
+                next_triple_path = triple_path + [edge_data["triple_id"]]
+                path_records.append((
+                    next_node,
+                    next_node_path,
+                    next_rel_path,
+                    next_triple_path,
+                ))
+
+                if len(path_records) >= max_paths:
+                    break
+                if len(next_rel_path) < self.max_hops:
+                    queue.append((
+                        next_node,
+                        next_node_path,
+                        next_rel_path,
+                        next_triple_path,
+                    ))
+
+        return path_records
+
+    def _pad_non_text_entity_embs(self, local_ent_embs, num_entities, emb_dim):
+        """
+        The text encoder only embeds text-bearing entities. Processed entity IDs
+        put non-text entities after text entities, so pad them with zero vectors
+        instead of dropping paths that touch them.
+        """
+        if local_ent_embs.shape[0] >= num_entities:
+            return local_ent_embs
+
+        num_missing = num_entities - local_ent_embs.shape[0]
+        pad = torch.zeros(num_missing, emb_dim, dtype=local_ent_embs.dtype)
+        return torch.cat([local_ent_embs, pad], dim=0)
 
     def _path_to_pyg_data(
         self,
-        nx_g,
         path_nodes,
+        edge_r_ids,
+        triple_ids,
         root_id,
         leaf_id,
         ans_ids,
         q_emb,
         local_ent_embs,
         local_rel_embs,
+        sample_idx,
     ):
         """
         参数变化：接收 local_ent_embs 和 local_rel_embs
@@ -248,21 +342,8 @@ class TreeScorerDataset(Dataset):
         num_nodes = len(path_nodes)
 
         # --- B. Edge Extraction ---
-        src_list = []
-        dst_list = []
-        edge_r_ids = []
-
-        for i in range(len(path_nodes) - 1):
-            u = path_nodes[i]
-            v = path_nodes[i + 1]
-
-            edges_dict = nx_g.get_edge_data(u, v)
-            first_key = list(edges_dict.keys())[0]
-            r_id = edges_dict[first_key]["r_id"]  # 这是局部关系 ID
-
-            src_list.append(node_to_local_idx[u])
-            dst_list.append(node_to_local_idx[v])
-            edge_r_ids.append(r_id)
+        src_list = list(range(num_nodes - 1))
+        dst_list = list(range(1, num_nodes))
 
         edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
 
@@ -299,6 +380,12 @@ class TreeScorerDataset(Dataset):
             leaf_mask=leaf_mask,
             q_emb=q_emb,
             y=y,
+            sample_idx=torch.tensor([sample_idx], dtype=torch.long),
+            root_id=torch.tensor([root_id], dtype=torch.long),
+            leaf_id=torch.tensor([leaf_id], dtype=torch.long),
+            path_node_ids=torch.tensor(path_nodes, dtype=torch.long),
+            path_rel_ids=torch.tensor(edge_r_ids, dtype=torch.long),
+            path_triple_ids=torch.tensor(triple_ids, dtype=torch.long),
             num_nodes=num_nodes,
         )
         return data

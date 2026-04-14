@@ -1,201 +1,299 @@
 import os
+import pickle
+import random
 import time
+from collections import defaultdict
+
+import pandas as pd
 import torch
 import torch.nn.functional as F
-import pandas as pd
 import wandb
-import numpy as np
 from torch.optim import Adam
+from torch_geometric.loader import DataLoader
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, accuracy_score
 
-# 关键变化：使用 PyG 的 DataLoader
-from torch_geometric.loader import DataLoader 
-
-# 假设你已经定义好了这些模块
-# from src.config.tree import load_yaml  # 假设你有新的 tree 配置文件
-from src.dataset.treescorer import TreeScorerDataset # 上一步实现的 Dataset
-from src.model.TreeScorer import TreeScorer # 上上步实现的 Model
+from src.config.treescorer import load_yaml
+from src.dataset.treescorer import TreeScorerDataset
+from src.model.TreeScorer import TreeScorer
 from src.setup import set_seed
 
+
+class QuestionBatchSampler:
+    def __init__(self, dataset, questions_per_batch, shuffle):
+        self.batches = [
+            indices for _, indices in sorted(dataset.qid2indices.items())
+            if len(indices) > 0
+        ]
+        self.questions_per_batch = max(1, questions_per_batch)
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        order = list(range(len(self.batches)))
+        if self.shuffle:
+            random.shuffle(order)
+
+        for start in range(0, len(order), self.questions_per_batch):
+            batch_indices = []
+            for batch_idx in order[start:start + self.questions_per_batch]:
+                batch_indices.extend(self.batches[batch_idx])
+            yield batch_indices
+
+    def __len__(self):
+        return (len(self.batches) + self.questions_per_batch - 1) // self.questions_per_batch
+
+
+def listwise_question_loss(logits, labels, qids, temperature=1.0):
+    logits = logits.view(-1)
+    labels = labels.view(-1).float()
+    qids = qids.view(-1).long()
+
+    losses = []
+    for qid in torch.unique(qids):
+        mask = qids == qid
+        q_logits = logits[mask] / temperature
+        q_labels = labels[mask]
+        pos_mask = q_labels > 0.5
+
+        if pos_mask.sum() == 0:
+            continue
+
+        log_probs = q_logits - torch.logsumexp(q_logits, dim=0)
+        losses.append(-log_probs[pos_mask].mean())
+
+    if len(losses) == 0:
+        return F.binary_cross_entropy_with_logits(logits, labels)
+
+    return torch.stack(losses).mean()
+
+
+def load_data_and_embs(dataset_name, text_encoder_name, split):
+    base_dir = f"data_files/{dataset_name}"
+    pkl_path = os.path.join(base_dir, "processed", f"{split}.pkl")
+    emb_path = os.path.join(base_dir, "emb", text_encoder_name, f"{split}.pth")
+
+    with open(pkl_path, "rb") as f:
+        raw_samples = pickle.load(f)
+
+    emb_dict = torch.load(emb_path, map_location="cpu")
+    return raw_samples, emb_dict
+
+
+def compute_question_hits(labels, scores, qids, k_list):
+    q2items = defaultdict(list)
+    for label, score, qid in zip(labels, scores, qids):
+        q2items[qid].append((score, label))
+
+    metrics = {f"hit@{k}": [] for k in k_list}
+    metrics["mrr"] = []
+
+    for items in q2items.values():
+        items.sort(key=lambda item: item[0], reverse=True)
+        sorted_labels = [label for _, label in items]
+
+        first_pos_rank = None
+        for rank, label in enumerate(sorted_labels, start=1):
+            if label > 0.5:
+                first_pos_rank = rank
+                break
+
+        metrics["mrr"].append(0.0 if first_pos_rank is None else 1.0 / first_pos_rank)
+        for k in k_list:
+            metrics[f"hit@{k}"].append(
+                1.0 if any(label > 0.5 for label in sorted_labels[:k]) else 0.0
+            )
+
+    return {
+        metric: sum(values) / max(len(values), 1)
+        for metric, values in metrics.items()
+    }
+
+
 @torch.no_grad()
-def eval_epoch(device, data_loader, model):
+def eval_epoch(config, device, data_loader, model):
     model.eval()
-    
     all_labels = []
     all_scores = []
-    total_loss = 0
-    
-    for batch in tqdm(data_loader, desc="Evaluating"):
-        # 1. 搬运数据到 GPU
-        batch = batch.to(device)
-        
-        # 2. 前向传播
-        # 注意：q_emb 需要在 Dataset 构建时放入 Data 对象中
-        # 此时 batch.q_emb 的形状是 [Batch_Size, Emb_Dim]
-        scores = model(batch, batch.q_emb).squeeze(-1) # [Batch_Size]
-        
-        # 3. 计算 Loss
-        labels = batch.y # [Batch_Size]
-        loss = F.binary_cross_entropy_with_logits(scores, labels)
-        total_loss += loss.item() * batch.num_graphs
-        
-        # 4. 收集结果用于计算指标
-        probs = torch.sigmoid(scores)
-        all_labels.extend(labels.cpu().numpy())
-        all_scores.extend(probs.cpu().numpy())
-    
-    # 计算整个 Epoch 的平均 Loss
-    avg_loss = total_loss / len(data_loader.dataset)
-    
-    # 计算分类指标
-    # AUC: 衡量模型区分正负样本的能力
-    try:
-        auc = roc_auc_score(all_labels, all_scores)
-    except ValueError:
-        auc = 0.5 # 防止只有一个类别报错
-        
-    # Accuracy: 简单的准确率 (阈值 0.5)
-    preds = [1 if p > 0.5 else 0 for p in all_scores]
-    acc = accuracy_score(all_labels, preds)
+    all_qids = []
+    total_loss = 0.0
+    num_batches = 0
 
-    metric_dict = {
-        'loss': avg_loss,
-        'auc': auc,
-        'acc': acc
-    }
-    
-    return metric_dict
+    for batch in tqdm(data_loader, desc="Evaluating", leave=False):
+        batch = batch.to(device)
+        logits = model(batch).view(-1)
+        labels = batch.y.view(-1).float()
+        qids = batch.qid.view(-1).long()
+
+        loss = listwise_question_loss(logits, labels, qids)
+        total_loss += loss.item()
+        num_batches += 1
+
+        all_labels.extend(labels.detach().cpu().tolist())
+        all_scores.extend(torch.sigmoid(logits).detach().cpu().tolist())
+        all_qids.extend(qids.detach().cpu().tolist())
+
+    metrics = compute_question_hits(
+        all_labels, all_scores, all_qids, config["eval"]["k_list"]
+    )
+    metrics["loss"] = total_loss / max(num_batches, 1)
+    return metrics
+
 
 def train_epoch(device, train_loader, model, optimizer):
     model.train()
-    epoch_loss = 0
-    num_samples = 0
-    
-    for batch in tqdm(train_loader, desc="Training"):
+    total_loss = 0.0
+    num_batches = 0
+
+    for batch in tqdm(train_loader, desc="Training", leave=False):
         batch = batch.to(device)
-        
-        # 1. 前向传播
-        # TreeScorer 的 forward 接收 batch 和 q_emb
-        pred_scores = model(batch, batch.q_emb).squeeze(-1) # [Batch_Size]
-        
-        # 2. 计算 Loss
-        # batch.y 是我们在 Dataset 里打的标签 (0 或 1)
-        labels = batch.y
-        loss = F.binary_cross_entropy_with_logits(pred_scores, labels)
-        
-        # 3. 反向传播
+        logits = model(batch).view(-1)
+        labels = batch.y.view(-1).float()
+        qids = batch.qid.view(-1).long()
+
+        loss = listwise_question_loss(logits, labels, qids)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
-        # 记录加权 Loss
-        epoch_loss += loss.item() * batch.num_graphs
-        num_samples += batch.num_graphs
-    
-    avg_loss = epoch_loss / num_samples
-    return {'loss': avg_loss}
+
+        total_loss += loss.item()
+        num_batches += 1
+
+    return {"loss": total_loss / max(num_batches, 1)}
+
+
+def build_dataset(config, split, mode):
+    dataset_name = config["dataset"]["name"]
+    text_encoder_name = config["dataset"]["text_encoder_name"]
+    raw_samples, emb_dict = load_data_and_embs(dataset_name, text_encoder_name, split)
+
+    tree_config = config["treescorer"]
+    cache_dir = os.path.join("data_files", dataset_name, "cache", "treescorer")
+    cache_path = os.path.join(
+        cache_dir,
+        f"trees_{dataset_name}_{split}_h{tree_config['max_hops']}_{mode}.pt",
+    )
+
+    return TreeScorerDataset(
+        raw_samples,
+        emb_dict,
+        max_hops=tree_config["max_hops"],
+        max_paths_per_root=tree_config["max_paths_per_root"],
+        max_paths_per_sample=tree_config["max_paths_per_sample"],
+        add_reverse_edges=tree_config["add_reverse_edges"],
+        mode=mode,
+        max_neg_per_pos=tree_config["max_neg_per_pos"],
+        max_neg_per_sample=tree_config["max_neg_per_sample"],
+        cache_path=cache_path,
+        use_cache=tree_config["use_cache"],
+        cache_version=tree_config["cache_version"],
+    )
+
 
 def main(args):
-    # 1. 配置加载
-    config_file = f'configs/treescorer/{args.dataset}.yaml' # 注意修改配置文件路径
+    config_file = f"configs/treescorer/{args.dataset}.yaml"
     config = load_yaml(config_file)
-    
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    torch.set_num_threads(config['env']['num_threads'])
-    set_seed(config['env']['seed'])
 
-    # 2. WandB 初始化
-    ts = time.strftime('%b%d-%H-%M-%S', time.gmtime())
-    exp_prefix = config['train']['save_prefix']
-    exp_name = f'Tree_{exp_prefix}_{ts}'
-    
-    wandb.init(
-        project=f'{args.dataset}_Tree',
-        name=exp_name,
-        config=config
-    )
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    torch.set_num_threads(config["env"]["num_threads"])
+    set_seed(config["env"]["seed"])
+
+    ts = time.strftime("%b%d-%H-%M-%S", time.gmtime())
+    exp_name = f"{config['train']['save_prefix']}_{ts}"
     os.makedirs(exp_name, exist_ok=True)
 
-    # 3. 数据集准备 (假设 raw_samples 和 emb 已经准备好)
-    # 在实际代码中，你需要先加载 raw_samples 和 embedding 矩阵
-    # 这里省略加载 raw_samples, ent_embs, rel_embs 的代码
-    print("Loading datasets...")
-    # 示例占位符：你需要实现一个函数来加载预处理好的 pickle/pt 文件
-    # raw_samples_train, ent_embs, rel_embs = load_processed_data(args.dataset, 'train')
-    
-    train_set = TreeScorerDataset(
-        raw_samples=raw_samples_train, # 需外部传入
-        entity_embs=ent_embs, 
-        relation_embs=rel_embs,
-        max_hops=config['data']['max_hops']
-    )
-    
-    val_set = TreeScorerDataset(
-        raw_samples=raw_samples_val, # 需外部传入
-        entity_embs=ent_embs, 
-        relation_embs=rel_embs,
-        max_hops=config['data']['max_hops']
+    config_df = pd.json_normalize(config, sep="/")
+    wandb.init(
+        project=f"{args.dataset}_TreeScorer",
+        name=exp_name,
+        config=config_df.to_dict(orient="records")[0],
     )
 
-    # 🌟 关键：使用 PyG 的 DataLoader
-    # 它会自动把多棵树 collate 成一个 Batch 对象
-    train_loader = DataLoader(train_set, batch_size=config['train']['batch_size'], shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=config['train']['batch_size'], shuffle=False)
-    
-    # 4. 模型初始化
-    emb_size = ent_embs.shape[-1]
+    train_set = build_dataset(config, split="train", mode="train")
+    val_set = build_dataset(config, split="val", mode="eval")
+
+    if len(train_set) == 0 or len(val_set) == 0:
+        raise ValueError(
+            f"TreeScorer dataset is empty: train={len(train_set)}, val={len(val_set)}"
+        )
+
+    train_loader = DataLoader(
+        train_set,
+        batch_sampler=QuestionBatchSampler(
+            train_set,
+            questions_per_batch=config["train"]["batch_size"],
+            shuffle=True,
+        ),
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_sampler=QuestionBatchSampler(
+            val_set,
+            questions_per_batch=config["train"]["batch_size"],
+            shuffle=False,
+        ),
+    )
+
+    emb_size = train_set[0].q_emb.shape[-1]
+    tree_config = config["treescorer"]
     model = TreeScorer(
-        emb_size=emb_size, 
-        hidden_size=config['model']['hidden_size'],
-        num_layers=config['model']['num_layers']
+        emb_size=emb_size,
+        hidden_size=tree_config["hidden_size"],
+        num_layers=tree_config["num_layers"],
+        heads=tree_config["heads"],
     ).to(device)
-    
-    optimizer = Adam(model.parameters(), lr=float(config['optimizer']['lr']))
+    optimizer = Adam(model.parameters(), **config["optimizer"])
 
-    # 5. 训练循环
-    print("Start Training...")
-    best_val_metric = 0 # 这里我们用 AUC 作为最佳指标
+    primary_k = config["eval"]["k_list"][0]
+    primary_metric = f"hit@{primary_k}"
+    best_metric = -1.0
     num_patient_epochs = 0
-    
-    for epoch in range(config['train']['num_epochs']):
-        # --- Eval ---
-        val_metrics = eval_epoch(device, val_loader, model)
-        target_val_metric = val_metrics['auc'] # 关注 AUC
-        
-        print(f"Epoch {epoch} | Val AUC: {val_metrics['auc']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
-        
-        # --- Checkpoint 保存 ---
-        if target_val_metric > best_val_metric:
+
+    for epoch in range(config["train"]["num_epochs"]):
+        train_log = train_epoch(device, train_loader, model, optimizer)
+        val_log = eval_epoch(config, device, val_loader, model)
+
+        target_metric = val_log.get(primary_metric, 0.0)
+        if target_metric > best_metric:
+            best_metric = target_metric
             num_patient_epochs = 0
-            best_val_metric = target_val_metric
-            best_state_dict = {
-                'config': config,
-                'model_state_dict': model.state_dict(),
-                'best_auc': best_val_metric
-            }
-            torch.save(best_state_dict, os.path.join(exp_name, 'best_tree_model.pth'))
+            torch.save(
+                {
+                    "model_type": "treescorer",
+                    "config": config,
+                    "model_state_dict": model.state_dict(),
+                    "best_metric": best_metric,
+                    "best_metric_name": primary_metric,
+                    "epoch": epoch,
+                },
+                os.path.join(exp_name, "cpt.pth"),
+            )
         else:
             num_patient_epochs += 1
 
-        # --- Logging ---
-        log_dict = {'epoch': epoch}
-        for k, v in val_metrics.items():
-            log_dict[f'val/{k}'] = v
+        log_dict = {
+            "epoch": epoch,
+            "num_patient_epochs": num_patient_epochs,
+            "train/loss": train_log["loss"],
+        }
+        for key, val in val_log.items():
+            log_dict[f"val/{key}"] = val
         wandb.log(log_dict)
 
-        # --- Train ---
-        train_metrics = train_epoch(device, train_loader, model, optimizer)
-        wandb.log({f'train/{k}': v for k, v in train_metrics.items()})
-        
-        # Early Stopping
-        if num_patient_epochs >= config['train']['patience']:
-            print(f"Early stopping at epoch {epoch}")
+        if num_patient_epochs >= config["train"]["patience"]:
             break
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     from argparse import ArgumentParser
+
     parser = ArgumentParser()
-    parser.add_argument('-d', '--dataset', type=str, required=True, help='Dataset name')
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        type=str,
+        required=True,
+        choices=["webqsp", "cwq", "chatdoctor5k"],
+        help="Dataset name",
+    )
     args = parser.parse_args()
+
     main(args)

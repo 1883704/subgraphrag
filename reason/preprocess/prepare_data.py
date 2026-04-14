@@ -97,6 +97,46 @@ def add_scored_triplets(data, score_dict_path, prompt_mode):
     return new_data
 
 
+def load_tree_results(tree_result_path):
+    if tree_result_path.endswith(".jsonl"):
+        tree_dict = {}
+        with open(tree_result_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                sample_id = row.pop("id")
+                tree_dict[sample_id] = row
+        return tree_dict
+
+    return torch.load(tree_result_path, weights_only=False)
+
+
+def add_scored_trees(data, tree_result_path):
+    if tree_result_path is None:
+        raise ValueError("Tree prompt modes require -p/--score_dict_path to point to a tree retrieval result.")
+
+    print("Adding scored reasoning trees...")
+    tree_dict = load_tree_results(tree_result_path)
+    new_data = []
+    missing = 0
+
+    for each_qa in tqdm(data):
+        tree_sample = tree_dict.get(each_qa["id"])
+        if tree_sample is None:
+            missing += 1
+            continue
+
+        each_qa["scored_trees"] = tree_sample.get("scored_trees", [])
+        each_qa["q_entity_in_graph"] = tree_sample.get("q_entity_in_graph", [])
+        each_qa["a_entity_in_graph"] = tree_sample.get("a_entity_in_graph", [])
+        each_qa["max_path_length"] = tree_sample.get("max_path_length")
+        new_data.append(each_qa)
+
+    print(f"Tree results not found for {missing} questions")
+    return new_data
+
+
 def sample_random_triplets(data, num_triplets, seed=0):
     print(f"Sampling {num_triplets} random triplets...")
     np.random.seed(seed)
@@ -122,6 +162,10 @@ def get_data(dataset_name, pred_file_path, score_dict_path, split, prompt_mode, 
         each_qa['a_entity'] = subgraphs[i]['a_entity']
         data.append(each_qa)
     # data = raw_data
+
+    if 'tree' in prompt_mode:
+        data = add_scored_trees(data, score_dict_path)
+        return data
 
     data = add_good_triplets_from_rog(data)
     data = add_scored_triplets(data, score_dict_path, prompt_mode)

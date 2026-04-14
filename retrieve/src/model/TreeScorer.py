@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, global_mean_pool
-import random
+from torch_geometric.nn import GATConv
 
 
 class TreeScorer(nn.Module):
@@ -43,7 +42,7 @@ class TreeScorer(nn.Module):
         """
         [修改点] 只接收 data 一个参数
         """
-        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x, edge_index = data.x, data.edge_index
 
         # [修改点] 从 data 中自动提取 edge_attr 和 q_emb
         # 确保 Dataset 里正确传递了这些属性

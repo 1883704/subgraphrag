@@ -6,6 +6,25 @@ def triplet_to_str(triplet):
     return f"({triplet[0]},{triplet[1]},{triplet[2]})"
 
 
+def reasoning_tree_to_str(tree, tree_idx):
+    lines = [
+        f"Tree {tree_idx}, score={tree.get('score', 0.0):.4f}, root={tree.get('root', '')}"
+    ]
+
+    for path_idx, path in enumerate(tree.get('paths', []), start=1):
+        lines.append(
+            f"Path {path_idx}, score={path.get('score', 0.0):.4f}:"
+        )
+        for triplet in path.get('triples', []):
+            lines.append(triplet_to_str(triplet))
+
+    if len(tree.get('paths', [])) == 0:
+        for triplet in tree.get('triples', []):
+            lines.append(triplet_to_str(triplet))
+
+    return "\n".join(lines)
+
+
 def unique_preserve_order(input_list):
     seen = set()
     unique_list = []
@@ -86,6 +105,22 @@ def get_prompts(each_qa, mode, sys_prompt, cot_prompt, thres, seed=0):
         if 'rev' in mode:
             input_triplets.reverse()
         triplet_prompt = "Triplets:\n" + "\n".join(input_triplets)
+
+    elif 'tree' in mode:
+        num_sampled_trees = int(mode.split('_')[1])
+        input_trees = each_qa.get('scored_trees', [])
+        if thres:
+            input_trees = [
+                tree for tree in input_trees
+                if tree.get('score', 0.0) >= thres
+            ]
+
+        input_trees = input_trees[:num_sampled_trees]
+        tree_lines = [
+            reasoning_tree_to_str(tree, tree_idx)
+            for tree_idx, tree in enumerate(input_trees, start=1)
+        ]
+        triplet_prompt = "Reasoning Trees:\n" + "\n\n".join(tree_lines)
 
     elif 'rand' in mode:
         num_sampled_triplets = int(mode.split('_')[1])
