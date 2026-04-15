@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import wandb
 from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
@@ -138,7 +139,7 @@ def eval_epoch(config, device, data_loader, model):
     return metrics
 
 
-def train_epoch(device, train_loader, model, optimizer):
+def train_epoch(device, train_loader, model, optimizer, grad_clip_norm):
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -152,6 +153,8 @@ def train_epoch(device, train_loader, model, optimizer):
         loss = listwise_question_loss(logits, labels, qids)
         optimizer.zero_grad()
         loss.backward()
+        if grad_clip_norm is not None and grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
 
         total_loss += loss.item()
@@ -241,18 +244,36 @@ def main(args):
         heads=tree_config["heads"],
     ).to(device)
     optimizer = Adam(model.parameters(), **config["optimizer"])
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=config["train"]["lr_scheduler_factor"],
+        patience=config["train"]["lr_scheduler_patience"],
+    )
 
-    primary_k = config["eval"]["k_list"][0]
-    primary_metric = f"hit@{primary_k}"
+    monitor_metric = config["train"]["monitor_metric"]
+    if monitor_metric.startswith("val/"):
+        monitor_metric = monitor_metric[len("val/"):]
+    primary_metric = monitor_metric
     best_metric = -1.0
     num_patient_epochs = 0
+    min_delta = config["train"]["min_delta"]
+    grad_clip_norm = config["train"]["grad_clip_norm"]
 
     for epoch in range(config["train"]["num_epochs"]):
-        train_log = train_epoch(device, train_loader, model, optimizer)
+        train_log = train_epoch(
+            device, train_loader, model, optimizer, grad_clip_norm)
         val_log = eval_epoch(config, device, val_loader, model)
 
-        target_metric = val_log.get(primary_metric, 0.0)
-        if target_metric > best_metric:
+        if primary_metric not in val_log:
+            raise KeyError(
+                f"Monitor metric '{primary_metric}' not found in validation "
+                f"metrics: {sorted(val_log.keys())}"
+            )
+        target_metric = val_log[primary_metric]
+        scheduler.step(target_metric)
+
+        if target_metric > best_metric + min_delta:
             best_metric = target_metric
             num_patient_epochs = 0
             torch.save(
@@ -272,6 +293,8 @@ def main(args):
         log_dict = {
             "epoch": epoch,
             "num_patient_epochs": num_patient_epochs,
+            "best_metric": best_metric,
+            "lr": optimizer.param_groups[0]["lr"],
             "train/loss": train_log["loss"],
         }
         for key, val in val_log.items():

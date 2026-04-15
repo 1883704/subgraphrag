@@ -25,6 +25,7 @@ class TreeScorerYaml(pydantic.BaseModel):
 
 class OptimizerYaml(pydantic.BaseModel):
     lr: float
+    weight_decay: float = 0.0
 
 
 class EvalYaml(pydantic.BaseModel):
@@ -36,6 +37,11 @@ class TreeScorerTrainYaml(pydantic.BaseModel):
     patience: int
     batch_size: int
     save_prefix: str
+    monitor_metric: str = "mrr"
+    min_delta: float = 0.0
+    grad_clip_norm: float = 1.0
+    lr_scheduler_factor: float = 0.5
+    lr_scheduler_patience: int = 2
 
 
 class TreeScorerExpYaml(pydantic.BaseModel):
