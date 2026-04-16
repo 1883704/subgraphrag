@@ -13,6 +13,50 @@ from src.model.TreeScorer import TreeScorer
 from src.setup import set_seed, prepare_sample
 
 
+def _latest_checkpoint_prefix(dataset, model_type):
+    if dataset is None:
+        return None
+    if model_type == 'treescorer':
+        return f'{dataset}_tree'
+    if model_type == 'retriever':
+        return f'{dataset}_'
+    return dataset
+
+
+def resolve_checkpoint_path(args):
+    if args.path and args.path != 'latest' and not args.latest:
+        return args.path
+
+    prefix = args.latest_prefix or _latest_checkpoint_prefix(
+        args.dataset, args.latest_type)
+    candidates = []
+    for name in os.listdir('.'):
+        if not os.path.isdir(name):
+            continue
+        if prefix and not name.startswith(prefix):
+            continue
+        if (
+            args.latest_type == 'retriever'
+            and args.dataset is not None
+            and name.startswith(f'{args.dataset}_tree')
+        ):
+            continue
+        cpt_path = os.path.join(name, 'cpt.pth')
+        if os.path.exists(cpt_path):
+            candidates.append(cpt_path)
+
+    if not candidates:
+        prefix_msg = f" with prefix '{prefix}'" if prefix else ''
+        raise FileNotFoundError(
+            f'No checkpoint directory{prefix_msg} found in {os.getcwd()}.'
+        )
+
+    candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    latest_path = candidates[0]
+    print(f'Using latest checkpoint: {latest_path}')
+    return latest_path
+
+
 def _entity_and_relation_lists(raw_sample):
     entity_list = raw_sample['text_entity_list'] + raw_sample['non_text_entity_list']
     relation_list = raw_sample['relation_list']
@@ -364,6 +408,7 @@ def run_treescorer_inference(args, cpt, device):
 @torch.no_grad()
 def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    args.path = resolve_checkpoint_path(args)
     cpt = torch.load(args.path, map_location='cpu')
 
     if not isinstance(cpt, dict) or 'config' not in cpt:
@@ -383,8 +428,18 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     
     parser = ArgumentParser()
-    parser.add_argument('-p', '--path', type=str, required=True,
-                        help='Path to a saved model checkpoint, e.g., webqsp_Nov08-01:14:47/cpt.pth')
+    parser.add_argument('-p', '--path', type=str, default=None,
+                        help='Path to a saved model checkpoint, e.g., webqsp_Nov08-01:14:47/cpt.pth. Use "latest" with -d to select the newest checkpoint.')
+    parser.add_argument('-d', '--dataset', type=str, default=None,
+                        choices=['webqsp', 'cwq', 'chatdoctor5k'],
+                        help='Dataset name used with --latest or -p latest')
+    parser.add_argument('--latest', action='store_true',
+                        help='Use the newest checkpoint directory in the current folder')
+    parser.add_argument('--latest_type', type=str, default='treescorer',
+                        choices=['treescorer', 'retriever', 'any'],
+                        help='Checkpoint prefix type used by --latest')
+    parser.add_argument('--latest_prefix', type=str, default=None,
+                        help='Custom checkpoint directory prefix used by --latest')
     parser.add_argument('--max_K', type=int, default=500,
                         help='K in top-K triple retrieval')
     parser.add_argument('--num_trees', type=int, default=5,
@@ -394,5 +449,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_triples_per_tree', type=int, default=30,
                         help='Maximum number of unique triples in each reasoning tree')
     args = parser.parse_args()
+
+    if not args.path and not args.latest:
+        parser.error('one of -p/--path or --latest is required')
     
     main(args)

@@ -82,6 +82,19 @@ where `P` is the path to a saved model checkpoint. The predicted retrieval resul
 
 `inference.py` also accepts checkpoints created by `train_tree.py`. TreeScorer scores root-to-leaf paths and aggregates the path scores back to ranked triples, producing the same `retrieval_result.pth` format as the default retriever.
 
+To run inference with the newest TreeScorer checkpoint for a dataset:
+
+```bash
+python inference.py --latest -d webqsp
+```
+
+This selects the newest `webqsp_tree_*/cpt.pth` checkpoint in the current
+directory. The equivalent short form is:
+
+```bash
+python inference.py -p latest -d webqsp
+```
+
 ### Evaluation
 
 ```bash
