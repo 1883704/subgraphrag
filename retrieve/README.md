@@ -88,3 +88,12 @@ where `P` is the path to a saved model checkpoint. The predicted retrieval resul
 python eval.py -d D -p P
 ```
 where `D` should be a dataset mentioned in ["Supported Datasets"](#supported-datasets) and `P` is the path to [inference result](#inference), e.g., `webqsp_Nov08-01:14:47/retrieval_result.pth`.
+
+For TreeScorer reasoning-tree outputs, evaluate tree-level answer coverage and
+duplicate trees with:
+
+```bash
+python eval_tree.py -p P
+```
+where `P` is the generated `tree_retrieval_result.jsonl`, e.g.,
+`webqsp_tree_Nov08-01:14:47/tree_retrieval_result.jsonl`.
