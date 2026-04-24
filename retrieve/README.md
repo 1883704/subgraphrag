@@ -28,6 +28,34 @@ config files and data files:
 - `data_files/<dataset>/raw/{train,val,test}.pkl`
 - `data_files/<dataset>/processed/{train,val,test}.pkl`
 
+For medical KGQA experiments, a generic builder is available:
+
+```bash
+python tools/build_medical_kgqa.py \
+  --dataset_name medmcqa_primekg \
+  --qa_format medmcqa \
+  --train_path <path-to-medmcqa-train.json> \
+  --val_path <path-to-medmcqa-dev.json> \
+  --test_path <path-to-medmcqa-test.json> \
+  --kg_path <path-to-primekg.csv> \
+  --head_col x_name \
+  --rel_col relation \
+  --tail_col y_name \
+  --max_hops 2 \
+  --max_triples 200 \
+  --add_reverse_edges
+```
+
+This produces:
+
+```text
+data_files/medmcqa_primekg/raw/train.pkl
+data_files/medmcqa_primekg/raw/val.pkl
+data_files/medmcqa_primekg/raw/test.pkl
+data_files/medmcqa_primekg/entity_identifiers.txt
+data_files/medmcqa_primekg/build_stats.json
+```
+
 ## 1-1: Entity and Relation Embedding Pre-Computation
 
 We first pre-compute and cache entity and relation embeddings for all samples to save time for later training and inference of retrievers.
