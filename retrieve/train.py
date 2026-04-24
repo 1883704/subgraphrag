@@ -98,7 +98,7 @@ def main(args):
     config_file = f'configs/retriever/{args.dataset}.yaml'
     config = load_yaml(config_file)
     
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     torch.set_num_threads(config['env']['num_threads'])
     set_seed(config['env']['seed'])
 
@@ -161,8 +161,8 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     
     parser = ArgumentParser()
-    parser.add_argument('-d', '--dataset', type=str, required=True, 
-                        choices=['webqsp', 'cwq','chatdoctor5k'], help='Dataset name')
+    parser.add_argument('-d', '--dataset', type=str, required=True,
+                        help='Dataset name')
     args = parser.parse_args()
     
     main(args)

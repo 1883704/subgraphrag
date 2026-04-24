@@ -314,7 +314,6 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         required=True,
-        choices=["webqsp", "cwq", "chatdoctor5k"],
         help="Dataset name",
     )
     args = parser.parse_args()

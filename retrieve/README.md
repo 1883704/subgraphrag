@@ -19,6 +19,15 @@ We support two built-in multi-hop knowledge graph question answering (KGQA) data
 - `webqsp`
 - `cwq`
 
+The retrieval pipeline also supports local datasets if you provide matching
+config files and data files:
+
+- `configs/emb/gte-large-en-v1.5/<dataset>.yaml`
+- `configs/retriever/<dataset>.yaml`
+- `configs/treescorer/<dataset>.yaml`
+- `data_files/<dataset>/raw/{train,val,test}.pkl`
+- `data_files/<dataset>/processed/{train,val,test}.pkl`
+
 ## 1-1: Entity and Relation Embedding Pre-Computation
 
 We first pre-compute and cache entity and relation embeddings for all samples to save time for later training and inference of retrievers.
@@ -41,6 +50,20 @@ python emb.py -d  webqsp
 ```
 where `D` should be a dataset mentioned in ["Supported Datasets"](#supported-datasets).
 
+For a local dataset prepared in the recommended layout,
+
+```text
+data_files/<dataset>/raw/train.pkl
+data_files/<dataset>/raw/val.pkl
+data_files/<dataset>/raw/test.pkl
+```
+
+the same command works directly:
+
+```bash
+python emb.py -d medmcqa_primekg
+```
+
 ## 1-2: Retriever Development
 
 We now train a retriever, employ it for retrieval (inference), and evaluate the retrieval results.
@@ -62,6 +85,13 @@ pip install pyg_lib==0.3.1 torch_scatter==2.1.2 torch_sparse==0.6.18 -f https://
 python train.py -d webqsp
 ```
 where `D` should be a dataset mentioned in ["Supported Datasets"](#supported-datasets).
+
+For local datasets, use the same interface:
+
+```bash
+python train.py -d medmcqa_primekg
+python train_tree.py -d medmcqa_primekg
+```
 
 To train the alternative TreeScorer path retriever, use:
 

@@ -431,7 +431,6 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--path', type=str, default=None,
                         help='Path to a saved model checkpoint, e.g., webqsp_Nov08-01:14:47/cpt.pth. Use "latest" with -d to select the newest checkpoint.')
     parser.add_argument('-d', '--dataset', type=str, default=None,
-                        choices=['webqsp', 'cwq', 'chatdoctor5k'],
                         help='Dataset name used with --latest or -p latest')
     parser.add_argument('--latest', action='store_true',
                         help='Use the newest checkpoint directory in the current folder')

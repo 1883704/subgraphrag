@@ -36,10 +36,24 @@ class RetrieverDataset:
         dataset_name,
         split
     ):
-        processed_file = os.path.join(
-            f'data_files/{dataset_name}/processed/{split}.pkl')
-        with open(processed_file, 'rb') as f:
-            return pickle.load(f)
+        split_names = [split]
+        if split == 'val':
+            split_names.append('validation')
+        elif split == 'validation':
+            split_names.append('val')
+
+        tried = []
+        for split_name in split_names:
+            processed_file = os.path.join(
+                f'data_files/{dataset_name}/processed/{split_name}.pkl')
+            tried.append(processed_file)
+            if os.path.exists(processed_file):
+                with open(processed_file, 'rb') as f:
+                    return pickle.load(f)
+
+        raise FileNotFoundError(
+            'Processed split file not found. Tried:\n  ' + '\n  '.join(tried)
+        )
 
     def _get_triple_scores(
         self,

@@ -50,6 +50,22 @@ For TreeScorer reasoning-tree results, use a tree prompt mode and point `-p` to 
 python main.py -d webqsp --prompt_mode tree_5 -p ../retrieve/webqsp_tree_Nov08-01-14-47/tree_retrieval_result.jsonl
 ```
 
+For local datasets, `main.py` can now read local `raw/processed` subgraphs
+directly, so you can run reasoning without a built-in `RoG-*` dataset as long
+as you provide a retrieval result path:
+
+```
+python main.py -d medmcqa_primekg --prompt_mode scored_100 -p ../retrieve/medmcqa_primekg_Nov08-01-14-47/retrieval_result.pth --skip_eval
+python main.py -d medmcqa_primekg --prompt_mode tree_5 -p ../retrieve/medmcqa_primekg_tree_Nov08-01-14-47/tree_retrieval_result.jsonl --skip_eval
+```
+
+If you already have a local `predictions.jsonl` input file, you can pass it
+explicitly:
+
+```
+python main.py -d medmcqa_primekg --prompt_mode scored_100 -p ../retrieve/medmcqa_primekg_Nov08-01-14-47/retrieval_result.pth --pred_file_path ./results/KGQA/medmcqa_primekg/custom/predictions.jsonl --skip_eval
+```
+
 ### Config
 
 Our used config for each dataset can be found in `./config`.

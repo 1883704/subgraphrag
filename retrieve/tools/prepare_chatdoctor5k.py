@@ -104,7 +104,18 @@ def main():
     parser = argparse.ArgumentParser(description="Convert chatdoctor5k.json to SubgraphRAG raw format (answer == a_entity).")
     parser.add_argument("--input", type=str, required=True, help="Path to chatdoctor5k.json (JSON array or JSONL).")
     parser.add_argument("--dataset_name", type=str, default="chatdoctor5k", help="Target dataset name under out_root/")
-    parser.add_argument("--out_root", type=str, default="data", help="Output root directory relative to script parent (default: data)")
+    parser.add_argument(
+        "--out_root",
+        type=str,
+        default="data_files",
+        help="Output root directory relative to retrieve/ (default: data_files)",
+    )
+    parser.add_argument(
+        "--out_stage",
+        type=str,
+        default="raw",
+        help="Subdirectory under dataset_name for raw split pickles (default: raw)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train_ratio", type=float, default=0.8)
     parser.add_argument("--val_ratio", type=float, default=0.1)
@@ -131,14 +142,14 @@ def main():
 
     # 保存到脚本上一级目录下的 out_root/<dataset_name>/
     repo_dir = Path(__file__).resolve().parents[1]
-    base_dir = repo_dir / args.out_root / args.dataset_name
+    base_dir = repo_dir / args.out_root / args.dataset_name / args.out_stage
     save_pickle(train, str(base_dir / "train.pkl"))
-    save_pickle(val, str(base_dir / "validation.pkl"))
+    save_pickle(val, str(base_dir / "val.pkl"))
     save_pickle(test, str(base_dir / "test.pkl"))
 
     print("Done. Saved raw data to:")
     print(f"  {base_dir / 'train.pkl'}   ({len(train)} samples)")
-    print(f"  {base_dir / 'validation.pkl'} ({len(val)} samples)")
+    print(f"  {base_dir / 'val.pkl'}     ({len(val)} samples)")
     print(f"  {base_dir / 'test.pkl'}    ({len(test)} samples)")
 
 

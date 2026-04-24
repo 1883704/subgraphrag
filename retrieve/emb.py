@@ -191,6 +191,25 @@ def load_local_parquet_sharded(base_path, split_name):
     return data
 
 
+def load_pickle_split(base_dirs, split_names):
+    for base_dir in base_dirs:
+        for split_name in split_names:
+            path = os.path.join(base_dir, f"{split_name}.pkl")
+            if os.path.exists(path):
+                import pickle as _pkl
+                with open(path, "rb") as f:
+                    return _pkl.load(f), path
+
+    tried = [
+        os.path.join(base_dir, f"{split_name}.pkl")
+        for base_dir in base_dirs
+        for split_name in split_names
+    ]
+    raise FileNotFoundError(
+        "Could not find split pickle. Tried:\n  " + "\n  ".join(tried)
+    )
+
+
 def get_emb(subset, text_encoder, save_file):
     emb_dict = dict()
     for i in tqdm(range(len(subset))):
@@ -230,18 +249,29 @@ def main(args):
         val_set = load_local_parquet_sharded(input_dir, 'validation')
         test_set = load_local_parquet_sharded(input_dir, 'test')
     elif args.dataset == 'chatdoctor5k':
-        # 对于 chatdoctor5k，使用我们已生成的 processed pkl 作为原始集合占位
-        import pickle as _pkl
-        proc_dir = os.path.join('data', 'chatdoctor5k')
-        print(f"Loading chatdoctor5k processed data from: {proc_dir}")
-        with open(os.path.join(proc_dir, 'train.pkl'), 'rb') as f:
-            train_set = _pkl.load(f)
-        with open(os.path.join(proc_dir, 'validation.pkl'), 'rb') as f:
-            val_set = _pkl.load(f)
-        with open(os.path.join(proc_dir, 'test.pkl'), 'rb') as f:
-            test_set = _pkl.load(f)
+        raw_dirs = [
+            os.path.join('data_files', 'chatdoctor5k', 'raw'),
+            os.path.join('data', 'chatdoctor5k'),
+        ]
+        train_set, train_path = load_pickle_split(raw_dirs, ['train'])
+        val_set, val_path = load_pickle_split(raw_dirs, ['val', 'validation'])
+        test_set, test_path = load_pickle_split(raw_dirs, ['test'])
+        print("Loading chatdoctor5k raw data from:")
+        print(f"  train: {train_path}")
+        print(f"  val:   {val_path}")
+        print(f"  test:  {test_path}")
     else:
-        raise NotImplementedError(f"Unknown dataset: {args.dataset}")
+        raw_dirs = [
+            os.path.join('data_files', args.dataset, 'raw'),
+            os.path.join('data', args.dataset),
+        ]
+        train_set, train_path = load_pickle_split(raw_dirs, ['train'])
+        val_set, val_path = load_pickle_split(raw_dirs, ['val', 'validation'])
+        test_set, test_path = load_pickle_split(raw_dirs, ['test'])
+        print(f"Loading {args.dataset} raw data from:")
+        print(f"  train: {train_path}")
+        print(f"  val:   {val_path}")
+        print(f"  test:  {test_path}")
 
     entity_identifiers = []
     with open(config['entity_identifier_file'], 'r') as f:
@@ -279,7 +309,7 @@ def main(args):
         skip_no_topic=False,
         skip_no_ans=False)
 
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     text_encoder_name = config['text_encoder']['name']
     if text_encoder_name == 'gte-large-en-v1.5':
@@ -317,7 +347,7 @@ if __name__ == '__main__':
 
     parser = ArgumentParser('Text Embedding Pre-Computation for Retrieval')
     parser.add_argument('-d', '--dataset', type=str, required=True,
-                        choices=['webqsp', 'cwq', 'chatdoctor5k'], help='Dataset name')
+                        help='Dataset name')
     args = parser.parse_args()
 
     main(args)

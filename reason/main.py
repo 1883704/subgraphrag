@@ -34,7 +34,7 @@ def get_defined_prompts(prompt_mode, model_name, llm_mode):
 
 
 def save_checkpoint(file_handle, data):
-    file_handle.write(json.dumps(data) + "\n")
+    file_handle.write(json.dumps(data, ensure_ascii=False) + "\n")
 
 
 def load_checkpoint(file_path):
@@ -59,7 +59,11 @@ def eval_all(pred_file_path, run, subset, split=None, eval_hops=-1):
     print(f"Evaluating on subset: {subset}")
 
     print("Results:")
-    hit1, f1, prec, recall, em, tw, mi_f1, mi_prec, mi_recall, total_cnt, no_ans_cnt, no_ans_ratio, hal_score, stats = eval_results_corrected(str(pred_file_path), cal_f1=True, subset=subset, split=split, eval_hops=eval_hops)
+    try:
+        hit1, f1, prec, recall, em, tw, mi_f1, mi_prec, mi_recall, total_cnt, no_ans_cnt, no_ans_ratio, hal_score, stats = eval_results_corrected(str(pred_file_path), cal_f1=True, subset=subset, split=split, eval_hops=eval_hops)
+    except NotImplementedError:
+        print("Skipping built-in KGQA evaluation for unsupported local dataset.")
+        return
     if subset:
         postfix = "_sub"
     else:
@@ -81,8 +85,11 @@ def eval_all(pred_file_path, run, subset, split=None, eval_hops=-1):
         for k, v in stats.items():
             run.log({f"stats{postfix}/{k}": v})
 
-    hit, _, _, _ = eval_results_original(str(pred_file_path), cal_f1=True, subset=subset, eval_hops=eval_hops)
-    run.log({f"results{postfix}/hit": hit})
+    try:
+        hit, _, _, _ = eval_results_original(str(pred_file_path), cal_f1=True, subset=subset, eval_hops=eval_hops)
+        run.log({f"results{postfix}/hit": hit})
+    except NotImplementedError:
+        print("Skipping original KGQA Hit evaluation for unsupported local dataset.")
     print("=" * 50)
     print("=" * 50)
 
@@ -103,6 +110,15 @@ def main():
     parser.add_argument("--temperature", type=float, default=0, help="Temperature")
     parser.add_argument("--frequency_penalty", type=float, default=0.16, help="Frequency penalty")
     parser.add_argument("--thres", type=float, default=0.0, help="Threshold")
+    parser.add_argument("--skip_eval", action="store_true", help="Skip built-in KGQA evaluation")
+    parser.add_argument(
+        "--pred_file_path",
+        type=str,
+        default=None,
+        help="Optional path to predictions.jsonl used as reasoning input. "
+             "If omitted, built-in KGQA defaults are used when available; "
+             "for local datasets, raw/processed subgraphs are used.",
+    )
 
     args = parser.parse_args()
     dataset_name = args.dataset_name
@@ -118,7 +134,12 @@ def main():
     frequency_penalty = args.frequency_penalty
     thres = args.thres
 
-    pred_file_path = f"./results/KGQA/{dataset_name}/RoG/{split}/results_gen_rule_path_RoG-{dataset_name}_RoG_{split}_predictions_3_False_jsonl/predictions.jsonl"
+    default_pred_file_path = (
+        f"./results/KGQA/{dataset_name}/RoG/{split}/"
+        f"results_gen_rule_path_RoG-{dataset_name}_RoG_{split}_predictions_3_False_jsonl/"
+        "predictions.jsonl"
+    )
+    pred_file_path = args.pred_file_path or default_pred_file_path
     run_name = f"{model_name}-{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}"
     run = wandb.init(project=f"RAG-{dataset_name}", name=run_name, config=args)
 
@@ -131,6 +152,11 @@ def main():
         elif dataset_name == "cwq":
             assert split == "test"
             score_dict_path = "./scored_triples/cwq_240907_unidir_test.pth"
+        else:
+            raise ValueError(
+                "Non-built-in datasets require -p/--score_dict_path for "
+                "retrieval results or tree results."
+            )
     else:
         score_dict_path = args.score_dict_path
 
@@ -158,9 +184,12 @@ def main():
 
     # If the processing completes, rename the files to remove the "resume" flag
     final_pred_file_path = raw_pred_file_path.with_name(raw_pred_file_path.stem.replace("-resume", "") + raw_pred_file_path.suffix)
-    os.rename(raw_pred_file_path, final_pred_file_path)
-    eval_all(final_pred_file_path, run, subset=True)
-    eval_all(final_pred_file_path, run, subset=False)
+    if final_pred_file_path.exists():
+        final_pred_file_path.unlink()
+    os.replace(raw_pred_file_path, final_pred_file_path)
+    if not args.skip_eval:
+        eval_all(final_pred_file_path, run, subset=True)
+        eval_all(final_pred_file_path, run, subset=False)
 
 
 if __name__ == "__main__":

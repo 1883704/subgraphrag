@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import pickle
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -8,7 +9,121 @@ from datasets import load_dataset
 from .prepare_prompts import unique_preserve_order
 
 
+def load_jsonl(path):
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def normalize_ground_truth(row):
+    if row.get("ground_truth") is not None:
+        return row
+
+    for key in ("a_entity_in_graph", "a_entity", "answer"):
+        value = row.get(key)
+        if value:
+            row["ground_truth"] = value if isinstance(value, list) else [value]
+            return row
+
+    row["ground_truth"] = []
+    return row
+
+
+def raw_item_from_subgraph(sample):
+    row = normalize_local_subgraph_sample(sample)
+    return normalize_ground_truth({
+        "id": row["id"],
+        "question": row.get("question", ""),
+        "ground_truth": row.get("a_entity", []),
+        "a_entity": row.get("a_entity", []),
+        "graph": row.get("graph", []),
+    })
+
+
+def graph_from_processed_sample(sample):
+    entity_list = sample.get("text_entity_list", []) + sample.get("non_text_entity_list", [])
+    relation_list = sample.get("relation_list", [])
+    graph = []
+    for h_id, r_id, t_id in zip(
+        sample.get("h_id_list", []),
+        sample.get("r_id_list", []),
+        sample.get("t_id_list", []),
+    ):
+        try:
+            graph.append((
+                entity_list[h_id],
+                relation_list[r_id],
+                entity_list[t_id],
+            ))
+        except IndexError:
+            continue
+    return graph
+
+
+def normalize_local_subgraph_sample(sample):
+    row = dict(sample)
+    if "graph" not in row:
+        row["graph"] = graph_from_processed_sample(row)
+    row["graph"] = [tuple(each) for each in row.get("graph", [])]
+    if "a_entity" not in row:
+        row["a_entity"] = row.get("answer", [])
+    return row
+
+
+def local_subgraph_candidates(dataset_name, split):
+    split_aliases = [split]
+    if split == "validation":
+        split_aliases.append("val")
+    elif split == "val":
+        split_aliases.append("validation")
+
+    roots = [
+        os.path.join("..", "retrieve", "data_files", dataset_name),
+        os.path.join("data_files", dataset_name),
+        os.path.join("..", "retrieve", "data", dataset_name),
+        os.path.join("data", dataset_name),
+    ]
+    stages = ["processed", "raw", ""]
+
+    candidates = []
+    for root in roots:
+        for stage in stages:
+            base = os.path.join(root, stage) if stage else root
+            for split_name in split_aliases:
+                candidates.append(os.path.join(base, f"{split_name}.pkl"))
+                candidates.append(os.path.join(base, f"{split_name}.jsonl"))
+                candidates.append(os.path.join(base, f"{split_name}.json"))
+    return candidates
+
+
+def load_local_subgraphs(dataset_name, split):
+    for path in local_subgraph_candidates(dataset_name, split):
+        if not os.path.exists(path):
+            continue
+
+        if path.endswith(".pkl"):
+            with open(path, "rb") as f:
+                rows = pickle.load(f)
+        elif path.endswith(".jsonl"):
+            rows = load_jsonl(path)
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+
+        print(f"Loaded local subgraphs from: {path}")
+        return [normalize_local_subgraph_sample(row) for row in rows]
+
+    return None
+
+
 def get_subgraphs(dataset_name, split):
+    local_rows = load_local_subgraphs(dataset_name, split)
+    if local_rows is not None:
+        return local_rows
+
     input_file = os.path.join("rmanluo", f"RoG-{dataset_name}")
     return load_dataset(input_file, split=split)
 
@@ -148,26 +263,57 @@ def sample_random_triplets(data, num_triplets, seed=0):
 
 
 def get_data(dataset_name, pred_file_path, score_dict_path, split, prompt_mode, seed=0, triplets_to_sample=[50, 100, 200, 300]):
-    with open(pred_file_path, "r") as f:
-        raw_data = [json.loads(line) for line in f]
+    subgraphs = None
+
+    if pred_file_path and os.path.exists(pred_file_path):
+        raw_data = load_jsonl(pred_file_path)
+    elif "tree" in prompt_mode and score_dict_path:
+        print(
+            "Prediction file not found; using tree retrieval result as local "
+            "reasoning input."
+        )
+        tree_dict = load_tree_results(score_dict_path)
+        raw_data = []
+        for sample_id, row in tree_dict.items():
+            item = {"id": sample_id}
+            item.update(row)
+            raw_data.append(normalize_ground_truth(item))
+    elif "rog" not in prompt_mode:
+        print(
+            "Prediction file not found; using local subgraphs as reasoning "
+            "input."
+        )
+        subgraphs = get_subgraphs(dataset_name, split)
+        raw_data = [raw_item_from_subgraph(row) for row in subgraphs]
+    else:
+        raise FileNotFoundError(f"Prediction file not found: {pred_file_path}")
 
     print("Loading subgraphs...")
-    subgraphs = get_subgraphs(dataset_name, split)
+    if subgraphs is None:
+        subgraphs = get_subgraphs(dataset_name, split)
+    subgraph_by_id = {row["id"]: row for row in subgraphs if "id" in row}
 
     print("Adding subgraphs to data...")
     data = []
     for i, each_qa in enumerate(tqdm(raw_data)):
-        assert each_qa["id"] == subgraphs[i]["id"]
-        each_qa["graph"] = [tuple(each) for each in subgraphs[i]["graph"]]
-        each_qa['a_entity'] = subgraphs[i]['a_entity']
+        subgraph = subgraph_by_id.get(each_qa["id"])
+        if subgraph is None and i < len(subgraphs):
+            subgraph = subgraphs[i]
+        if subgraph is None:
+            each_qa.setdefault("graph", [])
+            each_qa.setdefault("a_entity", each_qa.get("ground_truth", []))
+        else:
+            each_qa["graph"] = [tuple(each) for each in subgraph.get("graph", [])]
+            each_qa['a_entity'] = subgraph.get('a_entity', each_qa.get("ground_truth", []))
+        each_qa = normalize_ground_truth(each_qa)
         data.append(each_qa)
-    # data = raw_data
 
     if 'tree' in prompt_mode:
         data = add_scored_trees(data, score_dict_path)
         return data
 
-    data = add_good_triplets_from_rog(data)
+    if 'rog' in prompt_mode:
+        data = add_good_triplets_from_rog(data)
     data = add_scored_triplets(data, score_dict_path, prompt_mode)
     # for num_triplets in triplets_to_sample:
     #     data = sample_random_triplets(data, num_triplets, seed)
