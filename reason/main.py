@@ -57,6 +57,49 @@ def safe_run_component(value):
     return value.replace("\\", "/").split("/")[-1] or "model"
 
 
+def load_config_file(config_path):
+    if not config_path:
+        return {}
+
+    path = Path(config_path)
+    with path.open("r", encoding="utf-8") as f:
+        if path.suffix.lower() == ".json":
+            raw_config = json.load(f)
+        else:
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ImportError("PyYAML is required for YAML config files. Install it with `pip install pyyaml`.") from exc
+            raw_config = yaml.safe_load(f) or {}
+
+    if not isinstance(raw_config, dict):
+        raise ValueError(f"Config file must contain a mapping: {config_path}")
+
+    config = dict(raw_config)
+    parameters = config.pop("parameters", None)
+    if isinstance(parameters, dict):
+        for key, value in parameters.items():
+            if isinstance(value, dict) and "value" in value:
+                config[key] = value["value"]
+            else:
+                config[key] = value
+
+    api_config = config.pop("api", None)
+    if isinstance(api_config, dict):
+        for key, value in api_config.items():
+            config[f"api_{key}" if key in {"key", "base_url", "key_env"} else key] = value
+
+    aliases = {
+        "api_key": "api_key",
+        "api_key_env": "api_key_env",
+        "api_base_url": "api_base_url",
+        "base_url": "api_base_url",
+        "key_env": "api_key_env",
+        "key": "api_key",
+    }
+    return {aliases.get(key, key): value for key, value in config.items()}
+
+
 def eval_all(pred_file_path, run, subset, split=None, eval_hops=-1):
 
     print("=" * 50)
@@ -100,7 +143,12 @@ def eval_all(pred_file_path, run, subset, split=None, eval_hops=-1):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RAG for KGQA")
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", "--config-path", dest="config_path", type=str, default=None, help="Optional YAML/JSON config file.")
+    pre_args, _ = pre_parser.parse_known_args()
+    config_defaults = load_config_file(pre_args.config_path)
+
+    parser = argparse.ArgumentParser(description="RAG for KGQA", parents=[pre_parser])
     parser.add_argument("-d", "--dataset_name", type=str, default="webqsp", help="Dataset name")
     parser.add_argument("--prompt_mode", type=str, default="scored_100", help="Prompt mode")
     parser.add_argument("-p", "--score_dict_path", type=str)
@@ -109,6 +157,7 @@ def main():
     parser.add_argument("--llm_backend", "--llm-backend", choices=["auto", "local", "api"], default="auto", help="LLM backend. Use api for OpenAI-compatible APIs and local for vLLM.")
     parser.add_argument("--api_base_url", "--api-base-url", type=str, default=None, help="OpenAI-compatible API base URL. Defaults to OPENAI_BASE_URL.")
     parser.add_argument("--api_key_env", "--api-key-env", type=str, default="OPENAI_API_KEY", help="Environment variable that stores the API key.")
+    parser.add_argument("--api_key", "--api-key", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--request_timeout", "--request-timeout", type=int, default=60, help="API request timeout in seconds.")
     parser.add_argument("--max_samples", "--max-samples", type=int, default=None, help="Run only the first N samples for smoke tests.")
     parser.add_argument("--wandb_mode", "--wandb-mode", choices=["online", "offline", "disabled"], default=None, help="Override wandb mode.")
@@ -131,6 +180,8 @@ def main():
              "If omitted, built-in KGQA defaults are used when available; "
              "for local datasets, raw/processed subgraphs are used.",
     )
+    valid_config_keys = {action.dest for action in parser._actions}
+    parser.set_defaults(**{key: value for key, value in config_defaults.items() if key in valid_config_keys})
 
     args = parser.parse_args()
     if args.max_samples is not None and args.max_samples <= 0:
@@ -156,7 +207,10 @@ def main():
     )
     pred_file_path = args.pred_file_path or default_pred_file_path
     run_name = args.run_name or f"{model_name}-{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}"
-    wandb_kwargs = {"project": f"RAG-{dataset_name}", "name": run_name, "config": args}
+    wandb_config = vars(args).copy()
+    if wandb_config.get("api_key"):
+        wandb_config["api_key"] = "<redacted>"
+    wandb_kwargs = {"project": f"RAG-{dataset_name}", "name": run_name, "config": wandb_config}
     if args.wandb_mode:
         wandb_kwargs["mode"] = args.wandb_mode
     run = wandb.init(**wandb_kwargs)
@@ -193,6 +247,7 @@ def main():
         frequency_penalty,
         request_timeout=args.request_timeout,
         llm_backend=llm_backend,
+        api_key=args.api_key,
         api_key_env=args.api_key_env,
         api_base_url=args.api_base_url,
     )

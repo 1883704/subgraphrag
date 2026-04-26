@@ -12,7 +12,7 @@
 conda create -n reasoner python=3.10.14 -y
 conda activate reasoner
 pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
-pip install vllm==0.5.5 openai==1.50.2 wandb
+pip install vllm==0.5.5 openai==1.50.2 wandb pyyaml
 ```
 
 If vLLM fails to load a Hugging Face model with a connection or cache error,
@@ -62,6 +62,30 @@ python main.py -d webqsp --prompt_mode scored_100 \
 Use `--max-samples N` to test the full reasoning pipeline cheaply before a
 full run. Use `--wandb-mode offline` or `--wandb-mode disabled` when the machine
 cannot log in to Weights & Biases.
+
+You can also put these options in a YAML/JSON config file:
+
+```bash
+cp configs/api.example.yaml configs/api.local.yaml
+# edit configs/api.local.yaml
+python main.py --config configs/api.local.yaml
+```
+
+Config values can use either normal keys or the W&B sweep style already used in
+`configs/*_tune.yaml`:
+
+```yaml
+llm_backend: api
+model_name: qwen-plus
+api:
+  key: your_api_key
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+max_samples: 3
+wandb_mode: disabled
+```
+
+Files named `configs/*local*.yaml`, `configs/*secret*.yaml`, or
+`configs/*private*.yaml` are ignored by git.
 
 ## Reasoning (Inference)
 
