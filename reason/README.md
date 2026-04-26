@@ -15,6 +15,26 @@ pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 pip install vllm==0.5.5 openai==1.50.2 wandb
 ```
 
+If vLLM fails to load a Hugging Face model with a connection or cache error,
+download the model first or point `-m/--model_name` to an existing local model
+directory:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download meta-llama/Meta-Llama-3.1-8B-Instruct \
+  --local-dir ./models/Meta-Llama-3.1-8B-Instruct
+
+python main.py -d webqsp --prompt_mode scored_100 \
+  -m ./models/Meta-Llama-3.1-8B-Instruct
+```
+
+For GPT-compatible APIs, set credentials with environment variables:
+
+```bash
+export OPENAI_API_KEY=your_api_key
+export OPENAI_BASE_URL=https://your-api-host/v1
+```
+
 ## Reasoning (Inference)
 
 ### Using Pre-Processed Retrieval Results for Reproducibility

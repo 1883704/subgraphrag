@@ -7,16 +7,28 @@ from functools import partial
 from prompts import icl_user_prompt, icl_ass_prompt
 
 
+def _configure_hf_endpoint():
+    endpoint = os.getenv("HF_ENDPOINT") or os.getenv("HF_HUB_URL")
+    if endpoint:
+        os.environ["HF_ENDPOINT"] = endpoint
+        os.environ["HF_HUB_URL"] = endpoint
+    else:
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        os.environ.setdefault("HF_HUB_URL", "https://hf-mirror.com")
+
+
 def llm_init(model_name, tensor_parallel_size=1, max_seq_len_to_capture=8192, max_tokens=4000, seed=0, temperature=0, frequency_penalty=0, top_p=1.0, presence_penalty=0.0, request_timeout=60):
     if "gpt" not in model_name:
+        _configure_hf_endpoint()
         client = LLM(model=model_name, tensor_parallel_size=tensor_parallel_size, max_seq_len_to_capture=max_seq_len_to_capture)
         sampling_params = SamplingParams(temperature=temperature, max_tokens=max_tokens,
                                          frequency_penalty=frequency_penalty)
         llm = partial(client.chat, sampling_params=sampling_params, use_tqdm=False)
     else:
-        # Prefer environment configuration for API key and custom base URL
-        api_key = "sk-F1FklycUDApHZh6_lYdYcc33Sb-Y1R0b_hlF9gU6-QlrJJ21Q4_iVmcQ4KU"
-        base_url = "https://hk.uniapi.io/v1"
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY must be set when using GPT models.")
+        base_url = os.getenv("OPENAI_BASE_URL")
         if base_url:
             client = OpenAI(api_key=api_key, base_url=base_url)
         else:
