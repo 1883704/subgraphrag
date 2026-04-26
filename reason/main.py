@@ -8,14 +8,14 @@ from pathlib import Path
 
 from preprocess.prepare_data import get_data
 from preprocess.prepare_prompts import get_prompts_for_data
-from llm_utils import llm_init, llm_inf_all
+from llm_utils import is_api_backend, llm_init, llm_inf_all
 
 from metrics.evaluate_results_corrected import eval_results as eval_results_corrected
 from metrics.evaluate_results import eval_results as eval_results_original
 
 
-def get_defined_prompts(prompt_mode, model_name, llm_mode):
-    if 'gpt' in model_name or 'gpt' in prompt_mode:
+def get_defined_prompts(prompt_mode, model_name, llm_mode, llm_backend="auto"):
+    if is_api_backend(llm_backend, model_name) or 'gpt' in prompt_mode:
         if 'gptLabel' in prompt_mode:
             from prompts import sys_prompt_gpt, cot_prompt_gpt
             return sys_prompt_gpt, cot_prompt_gpt
@@ -50,6 +50,11 @@ def load_checkpoint(file_path):
         print("*" * 50)
         return ckpt
     return []
+
+
+def safe_run_component(value):
+    value = str(value).strip().strip("/\\")
+    return value.replace("\\", "/").split("/")[-1] or "model"
 
 
 def eval_all(pred_file_path, run, subset, split=None, eval_hops=-1):
@@ -101,6 +106,13 @@ def main():
     parser.add_argument("-p", "--score_dict_path", type=str)
     parser.add_argument("--llm_mode", type=str, default="sys_icl_dc", help="LLM mode")
     parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct", help="Model name")
+    parser.add_argument("--llm_backend", "--llm-backend", choices=["auto", "local", "api"], default="auto", help="LLM backend. Use api for OpenAI-compatible APIs and local for vLLM.")
+    parser.add_argument("--api_base_url", "--api-base-url", type=str, default=None, help="OpenAI-compatible API base URL. Defaults to OPENAI_BASE_URL.")
+    parser.add_argument("--api_key_env", "--api-key-env", type=str, default="OPENAI_API_KEY", help="Environment variable that stores the API key.")
+    parser.add_argument("--request_timeout", "--request-timeout", type=int, default=60, help="API request timeout in seconds.")
+    parser.add_argument("--max_samples", "--max-samples", type=int, default=None, help="Run only the first N samples for smoke tests.")
+    parser.add_argument("--wandb_mode", "--wandb-mode", choices=["online", "offline", "disabled"], default=None, help="Override wandb mode.")
+    parser.add_argument("--run_name", "--run-name", type=str, default=None, help="Optional wandb run name.")
     # parser.add_argument("--model_name", type=str, default="gpt-4o", help="Model name")
     parser.add_argument("--split", type=str, default="test", help="Split")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Tensor parallel size")
@@ -121,10 +133,13 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.max_samples is not None and args.max_samples <= 0:
+        parser.error("--max_samples must be a positive integer.")
     dataset_name = args.dataset_name
     prompt_mode = args.prompt_mode
     llm_mode = args.llm_mode
     model_name = args.model_name
+    llm_backend = args.llm_backend
     split = args.split
     tensor_parallel_size = args.tensor_parallel_size
     max_seq_len_to_capture = args.max_seq_len_to_capture
@@ -140,8 +155,11 @@ def main():
         "predictions.jsonl"
     )
     pred_file_path = args.pred_file_path or default_pred_file_path
-    run_name = f"{model_name}-{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}"
-    run = wandb.init(project=f"RAG-{dataset_name}", name=run_name, config=args)
+    run_name = args.run_name or f"{model_name}-{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}"
+    wandb_kwargs = {"project": f"RAG-{dataset_name}", "name": run_name, "config": args}
+    if args.wandb_mode:
+        wandb_kwargs["mode"] = args.wandb_mode
+    run = wandb.init(**wandb_kwargs)
 
     if args.score_dict_path is None:
         if "tree" in prompt_mode:
@@ -160,13 +178,28 @@ def main():
     else:
         score_dict_path = args.score_dict_path
 
-    raw_pred_folder_path = Path(f"./results/KGQA/{dataset_name}/SubgraphRAG/{args.model_name.split('/')[-1]}")
+    raw_pred_folder_path = Path(f"./results/KGQA/{dataset_name}/SubgraphRAG/{safe_run_component(args.model_name)}")
     raw_pred_folder_path.mkdir(parents=True, exist_ok=True)
-    raw_pred_file_path = raw_pred_folder_path / f"{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}-predictions-resume.jsonl"
+    sample_suffix = f"-first_{args.max_samples}" if args.max_samples else ""
+    raw_pred_file_path = raw_pred_folder_path / f"{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}{sample_suffix}-predictions-resume.jsonl"
 
-    llm = llm_init(model_name, tensor_parallel_size, max_seq_len_to_capture, max_tokens, seed, temperature, frequency_penalty)
+    llm = llm_init(
+        model_name,
+        tensor_parallel_size,
+        max_seq_len_to_capture,
+        max_tokens,
+        seed,
+        temperature,
+        frequency_penalty,
+        request_timeout=args.request_timeout,
+        llm_backend=llm_backend,
+        api_key_env=args.api_key_env,
+        api_base_url=args.api_base_url,
+    )
     data = get_data(dataset_name, pred_file_path, score_dict_path, split, prompt_mode)
-    sys_prompt, cot_prompt = get_defined_prompts(prompt_mode, model_name, llm_mode)
+    if args.max_samples:
+        data = data[:args.max_samples]
+    sys_prompt, cot_prompt = get_defined_prompts(prompt_mode, model_name, llm_mode, llm_backend)
     print("Generating prompts...")
     data = get_prompts_for_data(data, prompt_mode, sys_prompt, cot_prompt, thres)
 
@@ -174,7 +207,7 @@ def main():
     start_idx = len(load_checkpoint(raw_pred_file_path))
     with open(raw_pred_file_path, "a") as pred_file:
         for idx, each_qa in enumerate(tqdm(data[start_idx:], initial=start_idx, total=len(data))):
-            res = llm_inf_all(llm, each_qa, llm_mode, model_name)
+            res = llm_inf_all(llm, each_qa, llm_mode, model_name, llm_backend)
 
             for key in ["graph", "good_paths_rog", "good_triplets_rog", "scored_triplets", "scored_trees"]:
                 each_qa.pop(key, None)

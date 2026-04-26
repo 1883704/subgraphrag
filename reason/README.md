@@ -35,6 +35,34 @@ export OPENAI_API_KEY=your_api_key
 export OPENAI_BASE_URL=https://your-api-host/v1
 ```
 
+Then run a small smoke test through an OpenAI-compatible API:
+
+```bash
+python main.py -d webqsp --prompt_mode scored_100 \
+  --llm-backend api \
+  -m gpt-4o-mini \
+  --max-samples 3 \
+  --wandb-mode disabled
+```
+
+For third-party compatible APIs, pass the provider model name and base URL:
+
+```bash
+export DASHSCOPE_API_KEY=your_api_key
+
+python main.py -d webqsp --prompt_mode scored_100 \
+  --llm-backend api \
+  -m qwen-plus \
+  --api-key-env DASHSCOPE_API_KEY \
+  --api-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
+  --max-samples 3 \
+  --wandb-mode disabled
+```
+
+Use `--max-samples N` to test the full reasoning pipeline cheaply before a
+full run. Use `--wandb-mode offline` or `--wandb-mode disabled` when the machine
+cannot log in to Weights & Biases.
+
 ## Reasoning (Inference)
 
 ### Using Pre-Processed Retrieval Results for Reproducibility
