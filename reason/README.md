@@ -138,6 +138,20 @@ explicitly:
 python main.py -d medmcqa_primekg --prompt_mode scored_100 -p ../retrieve/medmcqa_primekg_Nov08-01-14-47/retrieval_result.pth --pred_file_path ./results/KGQA/medmcqa_primekg/custom/predictions.jsonl --skip_eval
 ```
 
+For MedMCQA-style local datasets, evaluate final multiple-choice QA accuracy
+after inference with:
+
+```bash
+python metrics/evaluate_medmcqa_accuracy.py --latest
+```
+
+Or pass one or more prediction files explicitly:
+
+```bash
+python metrics/evaluate_medmcqa_accuracy.py \
+  results/KGQA/medmcqa_primekg/SubgraphRAG/Qwen2.5-7B-Instruct/tree_5-sys_icl_dc-0.16-thres_0.0-test-predictions.jsonl
+```
+
 ### Config
 
 Our used config for each dataset can be found in `./config`.

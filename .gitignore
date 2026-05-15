@@ -9,6 +9,9 @@ env/
 
 # Environment files
 .env
+reason/configs/*local*.yaml
+reason/configs/*secret*.yaml
+reason/configs/*private*.yaml
 
 # Editor
 .vscode/
