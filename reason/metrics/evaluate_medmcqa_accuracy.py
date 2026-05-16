@@ -9,14 +9,24 @@ from pathlib import Path
 
 
 LABEL_MAP = {
-    "1": "A",
-    "2": "B",
-    "3": "C",
-    "4": "D",
     "A": "A",
     "B": "B",
     "C": "C",
     "D": "D",
+}
+
+ONE_BASED_NUMERIC_LABELS = {
+    1: "A",
+    2: "B",
+    3: "C",
+    4: "D",
+}
+
+ZERO_BASED_NUMERIC_LABELS = {
+    0: "A",
+    1: "B",
+    2: "C",
+    3: "D",
 }
 
 
@@ -27,8 +37,45 @@ def normalize_text(value):
     return text.strip()
 
 
-def normalize_label(value):
-    return LABEL_MAP.get(str(value or "").strip().upper(), "")
+def parse_int_label(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if not number.is_integer():
+        return None
+    return int(number)
+
+
+def normalize_option_label(value):
+    text = str(value or "").strip().upper()
+    if text in LABEL_MAP:
+        return LABEL_MAP[text]
+
+    number = parse_int_label(value)
+    if number is None:
+        return ""
+    return ONE_BASED_NUMERIC_LABELS.get(number, "")
+
+
+def normalize_gold_label(value, numeric_base):
+    text = str(value or "").strip().upper()
+    if text in LABEL_MAP:
+        return LABEL_MAP[text]
+
+    number = parse_int_label(value)
+    if number is None:
+        return ""
+
+    if numeric_base == "zero":
+        return ZERO_BASED_NUMERIC_LABELS.get(number, "")
+    if numeric_base == "one":
+        return ONE_BASED_NUMERIC_LABELS.get(number, "")
+
+    return ""
 
 
 def load_jsonl(path):
@@ -46,14 +93,55 @@ def load_gold(raw_path):
     return {row["id"]: row for row in rows}
 
 
-def get_gold_label(row):
+def infer_gold_numeric_base(gold):
+    values = []
+    for row in gold.values():
+        value = row.get("metadata", {}).get("answer_label")
+        number = parse_int_label(value)
+        if number is not None:
+            values.append(number)
+
+    value_counts = {}
+    for value in values:
+        value_counts[value] = value_counts.get(value, 0) + 1
+
+    if any(value == 0 for value in values):
+        return "zero", value_counts
+    if any(value == 4 for value in values):
+        return "one", value_counts
+
+    # MedMCQA's cop field is commonly zero-based. If the filtered subset does
+    # not contain class 0, this default is still safer than treating unknown
+    # labels as correct.
+    if values and min(values) >= 0 and max(values) <= 3:
+        return "zero", value_counts
+
+    return "one", value_counts
+
+
+def label_from_answer_text(row, options):
+    answer_text = row.get("metadata", {}).get("answer_text", "")
+    normalized_answer = normalize_text(answer_text)
+    if not normalized_answer:
+        return ""
+
+    for label, option_text in options:
+        if normalize_text(option_text) == normalized_answer:
+            return label
+    return ""
+
+
+def get_gold_label(row, numeric_base, options):
     metadata = row.get("metadata", {})
-    return normalize_label(metadata.get("answer_label"))
+    label = normalize_gold_label(metadata.get("answer_label"), numeric_base)
+    if label:
+        return label
+    return label_from_answer_text(row, options)
 
 
 def get_options(row):
     options = row.get("metadata", {}).get("options", [])
-    return [(normalize_label(label), str(text or "")) for label, text in options]
+    return [(normalize_option_label(label), str(text or "")) for label, text in options]
 
 
 def extract_label_from_prediction(prediction, options):
@@ -75,7 +163,7 @@ def extract_label_from_prediction(prediction, options):
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            label = normalize_label(match.group(1))
+            label = normalize_option_label(match.group(1))
             if label:
                 return label, "label"
 
@@ -88,11 +176,13 @@ def extract_label_from_prediction(prediction, options):
     return "", "parse_failed"
 
 
-def evaluate_file(pred_path, gold):
+def evaluate_file(pred_path, gold, numeric_base):
     rows = load_jsonl(pred_path)
-    total = 0
+    total_predictions = 0
+    evaluated = 0
     correct = 0
     missing_gold = 0
+    no_gold_label = 0
     parse_failed = 0
     method_counts = {}
     wrong = []
@@ -104,18 +194,23 @@ def evaluate_file(pred_path, gold):
             missing_gold += 1
             continue
 
-        gold_label = get_gold_label(gold_row)
         options = get_options(gold_row)
+        gold_label = get_gold_label(gold_row, numeric_base, options)
+        total_predictions += 1
+        if not gold_label:
+            no_gold_label += 1
+            continue
+
         pred_label, method = extract_label_from_prediction(
             row.get("prediction", ""), options
         )
 
-        total += 1
+        evaluated += 1
         method_counts[method] = method_counts.get(method, 0) + 1
         if not pred_label:
             parse_failed += 1
 
-        is_correct = pred_label == gold_label
+        is_correct = bool(pred_label) and pred_label == gold_label
         correct += int(is_correct)
 
         if not is_correct:
@@ -129,14 +224,16 @@ def evaluate_file(pred_path, gold):
                 "prediction": str(row.get("prediction", "")),
             })
 
-    accuracy = correct / total if total else 0.0
+    accuracy = correct / evaluated if evaluated else 0.0
     return {
         "pred_file": pred_path,
-        "total": total,
+        "total_predictions": total_predictions,
+        "evaluated": evaluated,
         "correct": correct,
         "accuracy": accuracy,
         "parse_failed": parse_failed,
         "missing_gold": missing_gold,
+        "no_gold_label": no_gold_label,
         "parse_methods": method_counts,
         "wrong": wrong,
     }
@@ -162,11 +259,13 @@ def default_raw_path(dataset_name, split):
 def print_result(result, show_wrong):
     print("=" * 80)
     print(f"pred_file:    {result['pred_file']}")
-    print(f"total:        {result['total']}")
+    print(f"total_pred:   {result['total_predictions']}")
+    print(f"evaluated:    {result['evaluated']}")
     print(f"correct:      {result['correct']}")
     print(f"accuracy:     {result['accuracy']:.4f}")
     print(f"parse_failed: {result['parse_failed']}")
     print(f"missing_gold: {result['missing_gold']}")
+    print(f"no_gold_label:{result['no_gold_label']}")
     print(f"parse_methods:{json.dumps(result['parse_methods'], ensure_ascii=False)}")
 
     if show_wrong:
@@ -223,6 +322,12 @@ def main():
         action="store_true",
         help="Evaluate the newest predictions.jsonl under results/KGQA/<dataset>.",
     )
+    parser.add_argument(
+        "--label-base",
+        choices=["auto", "zero", "one"],
+        default="auto",
+        help="Numeric base for gold answer_label/cop. MedMCQA is usually zero-based.",
+    )
     parser.add_argument("--show-wrong", type=int, default=5)
     parser.add_argument(
         "--wrong-out",
@@ -244,7 +349,9 @@ def main():
 
     raw_path = args.raw_path or default_raw_path(args.dataset_name, args.split)
     gold = load_gold(raw_path)
-    results = [evaluate_file(pred_path, gold) for pred_path in pred_files]
+    inferred_base, label_counts = infer_gold_numeric_base(gold)
+    numeric_base = inferred_base if args.label_base == "auto" else args.label_base
+    results = [evaluate_file(pred_path, gold, numeric_base) for pred_path in pred_files]
 
     if args.json:
         summaries = [
@@ -254,6 +361,8 @@ def main():
         print(json.dumps(summaries, ensure_ascii=False, indent=2))
     else:
         print(f"gold_file:    {raw_path}")
+        print(f"label_base:   {numeric_base}")
+        print(f"label_counts: {json.dumps(label_counts, ensure_ascii=False)}")
         for result in results:
             print_result(result, args.show_wrong)
 
