@@ -95,6 +95,14 @@ def _format_sample_result(raw_sample, scored_triples):
     }
 
 
+def _split_output_name(base_name, split):
+    if split == 'test':
+        return base_name
+
+    stem, ext = os.path.splitext(base_name)
+    return f'{stem}_{split}{ext}'
+
+
 @torch.no_grad()
 def run_retriever_inference(args, cpt, device):
     config = cpt['config']
@@ -102,7 +110,7 @@ def run_retriever_inference(args, cpt, device):
     torch.set_num_threads(config['env']['num_threads'])
     
     infer_set = RetrieverDataset(
-        config=config, split='test', skip_no_path=False)
+        config=config, split=args.split, skip_no_path=False)
     
     emb_size = infer_set[0]['q_emb'].shape[-1]
     model = Retriever(emb_size, **config['retriever']).to(device)
@@ -142,7 +150,10 @@ def run_retriever_inference(args, cpt, device):
         pred_dict[raw_sample['id']] = _format_sample_result(raw_sample, top_K_triples)
 
     root_path = os.path.dirname(args.path)
-    torch.save(pred_dict, os.path.join(root_path, 'retrieval_result.pth'))
+    torch.save(
+        pred_dict,
+        os.path.join(root_path, _split_output_name('retrieval_result.pth', args.split)),
+    )
 
 
 def _emb_dict_from_retriever_set(infer_set):
@@ -302,7 +313,7 @@ def run_treescorer_inference(args, cpt, device):
     torch.set_num_threads(config['env']['num_threads'])
 
     infer_set = RetrieverDataset(
-        config=config, split='test', skip_no_path=False)
+        config=config, split=args.split, skip_no_path=False)
     raw_samples = infer_set.processed_dict_list
     emb_dict = _emb_dict_from_retriever_set(infer_set)
 
@@ -311,7 +322,7 @@ def run_treescorer_inference(args, cpt, device):
         'data_files', config['dataset']['name'], 'cache', 'treescorer')
     cache_path = os.path.join(
         cache_dir,
-        f"trees_{config['dataset']['name']}_test_h{tree_config['max_hops']}_test.pt",
+        f"trees_{config['dataset']['name']}_{args.split}_h{tree_config['max_hops']}_test.pt",
     )
     tree_set = TreeScorerDataset(
         raw_samples,
@@ -397,11 +408,17 @@ def run_treescorer_inference(args, cpt, device):
         }
 
     root_path = os.path.dirname(args.path)
-    torch.save(pred_dict, os.path.join(root_path, 'retrieval_result.pth'))
-    torch.save(tree_pred_dict, os.path.join(root_path, 'tree_retrieval_result.pth'))
+    torch.save(
+        pred_dict,
+        os.path.join(root_path, _split_output_name('retrieval_result.pth', args.split)),
+    )
+    torch.save(
+        tree_pred_dict,
+        os.path.join(root_path, _split_output_name('tree_retrieval_result.pth', args.split)),
+    )
     _write_tree_jsonl(
         tree_pred_dict,
-        os.path.join(root_path, 'tree_retrieval_result.jsonl'),
+        os.path.join(root_path, _split_output_name('tree_retrieval_result.jsonl', args.split)),
     )
 
 
@@ -439,6 +456,8 @@ if __name__ == '__main__':
                         help='Checkpoint prefix type used by --latest')
     parser.add_argument('--latest_prefix', type=str, default=None,
                         help='Custom checkpoint directory prefix used by --latest')
+    parser.add_argument('--split', type=str, default='test',
+                        help='Data split for inference. Use val/validation for labeled MedMCQA validation evaluation.')
     parser.add_argument('--max_K', type=int, default=500,
                         help='K in top-K triple retrieval')
     parser.add_argument('--num_trees', type=int, default=5,
