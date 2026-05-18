@@ -121,6 +121,15 @@ python train.py -d medmcqa_primekg
 python train_tree.py -d medmcqa_primekg
 ```
 
+For MedMCQA-style four-option experiments, the candidate-aware evidence tree
+scorer uses each answer option as a candidate and learns to score
+question-candidate-path tuples:
+
+```bash
+python tools/inspect_candidate_tree_data.py -d medmcqa_primekg --split val --max_samples 64
+python train_candidate_tree.py --config configs/treescorer/medmcqa_primekg_candidate.yaml
+```
+
 To train the alternative TreeScorer path retriever, use:
 
 ```bash
@@ -151,6 +160,12 @@ directory. The equivalent short form is:
 
 ```bash
 python inference.py -p latest -d webqsp
+```
+
+For the candidate-aware scorer:
+
+```bash
+python inference.py --latest -d medmcqa_primekg --latest_type candidate_treescorer --split val
 ```
 
 ### Evaluation

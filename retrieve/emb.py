@@ -213,12 +213,22 @@ def load_pickle_split(base_dirs, split_names):
 def get_emb(subset, text_encoder, save_file):
     emb_dict = dict()
     for i in tqdm(range(len(subset))):
-        id, q_text, text_entity_list, relation_list = subset[i]
+        item = subset[i]
+        if len(item) == 4:
+            id, q_text, text_entity_list, relation_list = item
+            question_stem = q_text
+            option_texts = []
+        else:
+            id, q_text, question_stem, text_entity_list, relation_list, option_texts = item
 
         q_emb, entity_embs, relation_embs = text_encoder(
             q_text, text_entity_list, relation_list)
+        question_stem_emb = text_encoder.embed([question_stem])
+        option_embs = text_encoder.embed(option_texts)
         emb_dict_i = {
             'q_emb': q_emb,
+            'question_stem_emb': question_stem_emb,
+            'option_embs': option_embs,
             'entity_embs': entity_embs,
             'relation_embs': relation_embs
         } 

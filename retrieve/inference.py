@@ -1,5 +1,6 @@
 import os
 import json
+import pickle
 from collections import defaultdict
 
 import torch
@@ -8,14 +9,18 @@ from tqdm import tqdm
 
 from src.dataset.retriever import RetrieverDataset, collate_retriever
 from src.dataset.treescorer import TreeScorerDataset
+from src.dataset.candidate_treescorer import CandidateTreeScorerDataset
 from src.model.retriever import Retriever
 from src.model.TreeScorer import TreeScorer
+from src.model.CandidateTreeScorer import CandidateTreeScorer
 from src.setup import set_seed, prepare_sample
 
 
 def _latest_checkpoint_prefix(dataset, model_type):
     if dataset is None:
         return None
+    if model_type == 'candidate_treescorer':
+        return f'{dataset}_candidate_tree'
     if model_type == 'treescorer':
         return f'{dataset}_tree'
     if model_type == 'retriever':
@@ -101,6 +106,45 @@ def _split_output_name(base_name, split):
 
     stem, ext = os.path.splitext(base_name)
     return f'{stem}_{split}{ext}'
+
+
+def _load_processed_split(dataset_name, split):
+    split_names = [split]
+    if split == 'val':
+        split_names.append('validation')
+    elif split == 'validation':
+        split_names.append('val')
+
+    tried = []
+    for split_name in split_names:
+        path = os.path.join('data_files', dataset_name, 'processed', f'{split_name}.pkl')
+        tried.append(path)
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+    raise FileNotFoundError(
+        'Processed split file not found. Tried:\n  ' + '\n  '.join(tried)
+    )
+
+
+def _load_emb_split(dataset_name, text_encoder_name, split):
+    split_names = [split]
+    if split == 'val':
+        split_names.append('validation')
+    elif split == 'validation':
+        split_names.append('val')
+
+    tried = []
+    for split_name in split_names:
+        path = os.path.join(
+            'data_files', dataset_name, 'emb', text_encoder_name, f'{split_name}.pth'
+        )
+        tried.append(path)
+        if os.path.exists(path):
+            return torch.load(path, map_location='cpu')
+    raise FileNotFoundError(
+        'Embedding split file not found. Tried:\n  ' + '\n  '.join(tried)
+    )
 
 
 @torch.no_grad()
@@ -422,6 +466,176 @@ def run_treescorer_inference(args, cpt, device):
     )
 
 
+def _candidate_option_text(raw_sample, candidate_idx):
+    options = raw_sample.get('options') or raw_sample.get('metadata', {}).get('options', [])
+    if candidate_idx >= len(options):
+        return '', ''
+    item = options[candidate_idx]
+    if isinstance(item, dict):
+        return str(item.get('label', '')), str(item.get('text', ''))
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return str(item[0]), str(item[1])
+    return '', ''
+
+
+@torch.no_grad()
+def run_candidate_treescorer_inference(args, cpt, device):
+    config = cpt['config']
+    set_seed(config['env']['seed'])
+    torch.set_num_threads(config['env']['num_threads'])
+
+    dataset_name = config['dataset']['name']
+    text_encoder_name = config['dataset']['text_encoder_name']
+    raw_samples = _load_processed_split(dataset_name, args.split)
+    emb_dict = _load_emb_split(dataset_name, text_encoder_name, args.split)
+
+    tree_config = config['candidate_treescorer']
+    cache_dir = os.path.join(
+        'data_files', dataset_name, 'cache', 'candidate_treescorer')
+    cache_path = os.path.join(
+        cache_dir,
+        (
+            f"candidate_trees_{dataset_name}_{args.split}"
+            f"_h{tree_config['max_hops']}_test.pt"
+        ),
+    )
+    tree_set = CandidateTreeScorerDataset(
+        raw_samples,
+        emb_dict,
+        max_hops=tree_config['max_hops'],
+        max_paths_per_root=tree_config['max_paths_per_root'],
+        max_paths_per_sample=tree_config['max_paths_per_sample'],
+        max_paths_per_candidate=tree_config['max_paths_per_candidate'],
+        max_pos_per_candidate=tree_config['max_pos_per_candidate'],
+        max_hard_neg_per_candidate=tree_config['max_hard_neg_per_candidate'],
+        add_reverse_edges=tree_config['add_reverse_edges'],
+        label_base=config['dataset'].get('label_base', 'zero'),
+        num_options=config['dataset'].get('num_options', 4),
+        mode='test',
+        cache_path=cache_path,
+        use_cache=tree_config['use_cache'],
+        cache_version=tree_config['cache_version'],
+    )
+    if len(tree_set) == 0:
+        raise ValueError(
+            'CandidateTreeScorer inference dataset is empty. '
+            'Regenerate processed data and embeddings with candidate options.'
+        )
+
+    emb_size = tree_set[0].q_emb.shape[-1]
+    model = CandidateTreeScorer(
+        emb_size=emb_size,
+        hidden_size=tree_config['hidden_size'],
+        num_layers=tree_config['num_layers'],
+        heads=tree_config['heads'],
+        dropout=tree_config['dropout'],
+        node_extra_size=CandidateTreeScorerDataset.node_extra_size,
+        edge_extra_size=CandidateTreeScorerDataset.edge_extra_size,
+        path_extra_size=CandidateTreeScorerDataset.path_extra_size,
+    ).to(device)
+    model.load_state_dict(cpt['model_state_dict'])
+    model.eval()
+
+    triple_score_dicts = [defaultdict(float) for _ in raw_samples]
+    path_score_lists = [[] for _ in raw_samples]
+    candidate_score_lists = [
+        defaultdict(list) for _ in raw_samples
+    ]
+
+    for tree_data in tqdm(tree_set):
+        sample_idx = tree_data.sample_idx.item()
+        candidate_idx = tree_data.candidate_idx.item()
+        tree_data = tree_data.to(device)
+        score = torch.sigmoid(model(tree_data).reshape(-1))[0].item()
+
+        path_node_ids = tree_data.path_node_ids.detach().cpu().tolist()
+        path_rel_ids = tree_data.path_rel_ids.detach().cpu().tolist()
+        path_triple_ids = getattr(tree_data, 'path_triple_ids', None)
+        if path_triple_ids is not None:
+            path_triple_ids = path_triple_ids.detach().cpu().tolist()
+
+        raw_sample = raw_samples[sample_idx]
+        _score_path_triples(
+            triple_score_dicts[sample_idx],
+            raw_sample,
+            path_node_ids,
+            path_rel_ids,
+            score,
+            path_triple_ids,
+        )
+        entry = _path_entry(
+            raw_sample,
+            path_node_ids,
+            path_rel_ids,
+            score,
+            path_triple_ids,
+        )
+        candidate_label, candidate_text = _candidate_option_text(raw_sample, candidate_idx)
+        entry['candidate_idx'] = candidate_idx
+        entry['candidate_label'] = candidate_label
+        entry['candidate_text'] = candidate_text
+        path_score_lists[sample_idx].append(entry)
+        candidate_score_lists[sample_idx][candidate_idx].append(score)
+
+    pred_dict = {}
+    tree_pred_dict = {}
+    for i, raw_sample in enumerate(raw_samples):
+        top_K_triples = [
+            (triple[0], triple[1], triple[2], score)
+            for triple, score in sorted(
+                triple_score_dicts[i].items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:args.max_K]
+        ]
+        pred_dict[raw_sample['id']] = {
+            'question': raw_sample['question'],
+            'scored_triples': top_K_triples,
+            'q_entity': raw_sample.get('q_entity', []),
+            'a_entity': raw_sample.get('a_entity', []),
+            'max_path_length': raw_sample.get('max_path_length'),
+        }
+
+        candidate_scores = []
+        for candidate_idx in range(config['dataset'].get('num_options', 4)):
+            scores = candidate_score_lists[i].get(candidate_idx, [])
+            candidate_label, candidate_text = _candidate_option_text(raw_sample, candidate_idx)
+            candidate_scores.append({
+                'candidate_idx': candidate_idx,
+                'candidate_label': candidate_label,
+                'candidate_text': candidate_text,
+                'score': max(scores) if scores else 0.0,
+            })
+
+        tree_pred_dict[raw_sample['id']] = {
+            'question': raw_sample['question'],
+            'q_entity': raw_sample.get('q_entity', []),
+            'a_entity': raw_sample.get('a_entity', []),
+            'max_path_length': raw_sample.get('max_path_length'),
+            'candidate_scores': candidate_scores,
+            'scored_trees': _merge_paths_to_trees(
+                path_score_lists[i],
+                args.num_trees,
+                args.max_paths_per_tree,
+                args.max_triples_per_tree,
+            ),
+        }
+
+    root_path = os.path.dirname(args.path)
+    torch.save(
+        pred_dict,
+        os.path.join(root_path, _split_output_name('retrieval_result.pth', args.split)),
+    )
+    torch.save(
+        tree_pred_dict,
+        os.path.join(root_path, _split_output_name('tree_retrieval_result.pth', args.split)),
+    )
+    _write_tree_jsonl(
+        tree_pred_dict,
+        os.path.join(root_path, _split_output_name('tree_retrieval_result.jsonl', args.split)),
+    )
+
+
 @torch.no_grad()
 def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -435,7 +649,9 @@ def main(args):
         )
 
     config = cpt['config']
-    if cpt.get('model_type') == 'treescorer' or 'treescorer' in config:
+    if cpt.get('model_type') == 'candidate_treescorer':
+        run_candidate_treescorer_inference(args, cpt, device)
+    elif cpt.get('model_type') == 'treescorer' or 'treescorer' in config:
         run_treescorer_inference(args, cpt, device)
     else:
         run_retriever_inference(args, cpt, device)
@@ -452,7 +668,7 @@ if __name__ == '__main__':
     parser.add_argument('--latest', action='store_true',
                         help='Use the newest checkpoint directory in the current folder')
     parser.add_argument('--latest_type', type=str, default='treescorer',
-                        choices=['treescorer', 'retriever', 'any'],
+                        choices=['candidate_treescorer', 'treescorer', 'retriever', 'any'],
                         help='Checkpoint prefix type used by --latest')
     parser.add_argument('--latest_prefix', type=str, default=None,
                         help='Custom checkpoint directory prefix used by --latest')

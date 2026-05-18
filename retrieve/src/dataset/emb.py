@@ -3,6 +3,24 @@ import pickle
 
 from tqdm import tqdm
 
+
+def _normalize_options(metadata):
+    options = metadata.get("options", []) if isinstance(metadata, dict) else []
+    normalized = []
+    for item in options:
+        if isinstance(item, dict):
+            label = str(item.get("label", "")).strip()
+            text = str(item.get("text", "")).strip()
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            label = str(item[0]).strip()
+            text = str(item[1]).strip()
+        else:
+            continue
+        if label and text:
+            normalized.append((label, text))
+    return normalized
+
+
 class EmbInferDataset:
     def __init__(
         self,
@@ -142,9 +160,36 @@ class EmbInferDataset:
             if entity_id is not None:
                 a_entity_id_list.append(entity_id)
 
+        metadata = sample.get('metadata', {}) or {}
+        options = _normalize_options(metadata)
+        candidate_entities = metadata.get("candidate_entities", [])
+        candidate_by_label = {}
+        if isinstance(candidate_entities, list):
+            for candidate in candidate_entities:
+                if not isinstance(candidate, dict):
+                    continue
+                label = str(candidate.get("label", "")).strip()
+                entities = candidate.get("entities", []) or []
+                candidate_by_label[label] = [
+                    str(entity).strip()
+                    for entity in entities
+                    if str(entity).strip()
+                ]
+
+        option_entity_id_lists = []
+        for label, option_text in options:
+            option_entities = candidate_by_label.get(label, [])
+            option_entity_ids = []
+            for entity in option_entities:
+                entity_id = entity2id.get(entity, None)
+                if entity_id is not None:
+                    option_entity_ids.append(entity_id)
+            option_entity_id_lists.append(option_entity_ids)
+
         processed_dict = {
             'id': sample['id'],
             'question': question,
+            'question_stem': metadata.get('question_stem', question),
             'q_entity': sample['q_entity'],
             'q_entity_id_list': q_entity_id_list,
             'text_entity_list': text_entity_list,
@@ -154,7 +199,12 @@ class EmbInferDataset:
             'r_id_list': r_id_list,
             't_id_list': t_id_list,
             'a_entity': sample['a_entity'],
-            'a_entity_id_list': a_entity_id_list
+            'a_entity_id_list': a_entity_id_list,
+            'metadata': metadata,
+            'options': options,
+            'option_entity_id_lists': option_entity_id_lists,
+            'answer_label': metadata.get('answer_label', ''),
+            'answer_label_letter': metadata.get('answer_label_letter', ''),
         }
 
         return processed_dict
@@ -167,7 +217,9 @@ class EmbInferDataset:
         
         id = sample['id']
         q_text = sample['question']
+        question_stem = sample.get('question_stem', q_text)
         text_entity_list = sample['text_entity_list']
         relation_list = sample['relation_list']
+        option_texts = [text for _, text in sample.get('options', [])]
         
-        return id, q_text, text_entity_list, relation_list
+        return id, q_text, question_stem, text_entity_list, relation_list, option_texts

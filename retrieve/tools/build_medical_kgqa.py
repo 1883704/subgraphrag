@@ -189,6 +189,30 @@ def build_question_text(question, options):
     return "\n".join(lines).strip()
 
 
+def option_label_to_index(label):
+    if label is None:
+        return None
+
+    label = str(label).strip()
+    if not label:
+        return None
+
+    upper = label.upper()
+    if upper in {"A", "B", "C", "D"}:
+        return ord(upper) - ord("A")
+
+    try:
+        value = int(label)
+    except ValueError:
+        return None
+
+    # MedMCQA stores cop as a zero-based option index: 0=A, 1=B, 2=C, 3=D.
+    if 0 <= value <= 3:
+        return value
+
+    return None
+
+
 def parse_medmcqa_row(row):
     option_pairs = []
     for label, key in (("A", "opa"), ("B", "opb"), ("C", "opc"), ("D", "opd")):
@@ -198,13 +222,11 @@ def parse_medmcqa_row(row):
 
     correct_value = row.get("cop")
     answer_text = ""
-    if correct_value is not None and str(correct_value).strip():
-        try:
-            index = int(correct_value) - 1
-        except ValueError:
-            index = None
-        if index is not None and 0 <= index < len(option_pairs):
-            answer_text = option_pairs[index][1]
+    correct_index = option_label_to_index(correct_value)
+    answer_label_letter = ""
+    if correct_index is not None and 0 <= correct_index < len(option_pairs):
+        answer_label_letter = option_pairs[correct_index][0]
+        answer_text = option_pairs[correct_index][1]
 
     return {
         "id": str(row.get("id", "")),
@@ -213,6 +235,7 @@ def parse_medmcqa_row(row):
         "options": option_pairs,
         "answer_text": answer_text,
         "answer_label": str(correct_value).strip(),
+        "answer_label_letter": answer_label_letter,
         "explanation": str(row.get("exp", "")).strip(),
     }
 
@@ -240,6 +263,7 @@ def parse_medqa_row(row):
         "options": option_pairs,
         "answer_text": answer_text,
         "answer_label": answer_key,
+        "answer_label_letter": answer_key,
         "explanation": str(row.get("explanation", "")).strip(),
     }
 
@@ -256,6 +280,7 @@ def parse_generic_row(row, question_field, answer_field):
         "options": [],
         "answer_text": str(answer_text).strip(),
         "answer_label": "",
+        "answer_label_letter": "",
         "explanation": "",
     }
 
@@ -306,14 +331,42 @@ def convert_split(
             max_phrase_tokens,
             max_question_entities,
         )
-        a_entity = find_entities_in_text(
-            answer_text,
-            phrase_to_entities,
-            max_phrase_tokens,
-            max_answer_entities,
-        )
+        candidate_entities = []
+        for option_label, option_text in parsed["options"]:
+            option_entities = find_entities_in_text(
+                option_text,
+                phrase_to_entities,
+                max_phrase_tokens,
+                max_answer_entities,
+            )
+            candidate_entities.append({
+                "label": option_label,
+                "text": option_text,
+                "entities": option_entities,
+            })
 
-        graph_seeds = list(dict.fromkeys(q_entity + a_entity))
+        answer_label_letter = parsed.get("answer_label_letter", "")
+        a_entity = []
+        for candidate in candidate_entities:
+            if candidate["label"] == answer_label_letter:
+                a_entity = list(candidate["entities"])
+                break
+
+        if not a_entity:
+            a_entity = find_entities_in_text(
+                answer_text,
+                phrase_to_entities,
+                max_phrase_tokens,
+                max_answer_entities,
+            )
+
+        option_seed_entities = []
+        for candidate in candidate_entities:
+            option_seed_entities.extend(candidate["entities"])
+
+        graph_seeds = list(dict.fromkeys(q_entity + option_seed_entities))
+        if not graph_seeds:
+            graph_seeds = list(dict.fromkeys(q_entity + a_entity))
         graph = bfs_collect_triples(
             adjacency,
             graph_seeds,
@@ -339,9 +392,12 @@ def convert_split(
             "metadata": {
                 "split": split_name,
                 "qa_format": qa_format,
+                "question_stem": question_stem,
                 "answer_text": answer_text,
                 "answer_label": parsed["answer_label"],
+                "answer_label_letter": parsed.get("answer_label_letter", ""),
                 "options": parsed["options"],
+                "candidate_entities": candidate_entities,
                 "explanation": parsed["explanation"],
             },
         })
