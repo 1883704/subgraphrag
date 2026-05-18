@@ -15,7 +15,10 @@ from metrics.evaluate_results import eval_results as eval_results_original
 
 
 def get_defined_prompts(prompt_mode, model_name, llm_mode, llm_backend="auto"):
-    if is_api_backend(llm_backend, model_name) or 'gpt' in prompt_mode:
+    if 'mcq' in prompt_mode:
+        from prompts import mcq_sys_prompt, mcq_cot_prompt
+        return mcq_sys_prompt, mcq_cot_prompt
+    elif is_api_backend(llm_backend, model_name) or 'gpt' in prompt_mode:
         if 'gptLabel' in prompt_mode:
             from prompts import sys_prompt_gpt, cot_prompt_gpt
             return sys_prompt_gpt, cot_prompt_gpt

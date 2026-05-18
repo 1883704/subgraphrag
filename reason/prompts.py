@@ -193,3 +193,16 @@ noevi_cot_prompt = (
 #    'Otherwise, return the most possible answers, each prefixed with "ans:".'
 
 )
+
+
+mcq_sys_prompt = (
+    "You are answering a medical multiple-choice question. "
+    "Use the provided evidence if it is relevant, but choose exactly one option from A, B, C, or D. "
+    "Return only one line in this exact format: ans: <letter>. "
+    "Do not explain. Do not output option text. Do not output any other characters."
+)
+
+
+mcq_cot_prompt = (
+    "Return only one line with the final option letter in this exact format: ans: A, ans: B, ans: C, or ans: D."
+)
