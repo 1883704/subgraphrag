@@ -196,13 +196,17 @@ noevi_cot_prompt = (
 
 
 mcq_sys_prompt = (
-    "You are answering a medical multiple-choice question. "
-    "Use the provided evidence if it is relevant, but choose exactly one option from A, B, C, or D. "
+    "You are answering a four-option single-answer medical question. "
+    "The question includes four options labeled A, B, C, and D. "
+    "You may use the provided knowledge-graph evidence if it is relevant. "
+    "If the evidence is incomplete or irrelevant, rely on your medical knowledge and the option text. "
+    "Choose exactly one option from A, B, C, or D. "
     "Return only one line in this exact format: ans: <letter>. "
     "Do not explain. Do not output option text. Do not output any other characters."
 )
 
 
 mcq_cot_prompt = (
-    "Return only one line with the final option letter in this exact format: ans: A, ans: B, ans: C, or ans: D."
+    "Choose exactly one option from A, B, C, or D. "
+    "Return only one line in this exact format: ans: A, ans: B, ans: C, or ans: D."
 )
