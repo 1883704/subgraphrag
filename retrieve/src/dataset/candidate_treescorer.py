@@ -92,7 +92,7 @@ class CandidateTreeScorerDataset(Dataset):
         mode="train",
         cache_path=None,
         use_cache=True,
-        cache_version="candidate_v1",
+        cache_version="candidate_v2",
     ):
         self.emb_dict = emb_dict
         self.max_hops = max_hops
@@ -220,12 +220,20 @@ class CandidateTreeScorerDataset(Dataset):
                 continue
 
             option_entity_id_lists = self._option_entity_id_lists(sample, options)
-            path_records = self._enumerate_question_paths(nx_g, root_ids)
-            raw_paths += len(path_records)
+            question_path_records = self._enumerate_paths_from_roots(nx_g, root_ids)
+            raw_paths += len(question_path_records)
 
             start_idx = len(self.data_list)
             for candidate_idx, (candidate_label, _) in enumerate(options):
                 candidate_entity_ids = set(option_entity_id_lists[candidate_idx])
+                candidate_path_records = self._enumerate_paths_from_roots(
+                    nx_g,
+                    sorted(candidate_entity_ids),
+                )
+                path_records = self._dedupe_records(
+                    question_path_records + candidate_path_records
+                )
+                raw_paths += len(candidate_path_records)
                 selected_records = self._select_records_for_candidate(
                     path_records,
                     candidate_entity_ids,
@@ -322,7 +330,7 @@ class CandidateTreeScorerDataset(Dataset):
             path_has_candidate = bool(path_nodes & candidate_entity_ids)
             is_positive = (
                 candidate_idx == gold_idx
-                and leaf_is_candidate
+                and path_has_candidate
                 and bool(candidate_entity_ids)
             )
             if is_positive:
@@ -385,7 +393,7 @@ class CandidateTreeScorerDataset(Dataset):
                 )
         return g
 
-    def _enumerate_question_paths(self, nx_g, root_ids):
+    def _enumerate_paths_from_roots(self, nx_g, root_ids):
         records = []
         seen = set()
         for root_id in root_ids:
@@ -407,6 +415,21 @@ class CandidateTreeScorerDataset(Dataset):
                 if len(records) >= self.max_paths_per_sample:
                     break
         return records
+
+    def _dedupe_records(self, records):
+        deduped = []
+        seen = set()
+        for record in records:
+            key = (
+                tuple(record["path_nodes"]),
+                tuple(record["path_triple_ids"]),
+                tuple(record["path_dirs"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+        return deduped
 
     def _enumerate_paths_from_root(self, nx_g, root_id, max_paths):
         path_records = []
@@ -558,7 +581,7 @@ class CandidateTreeScorerDataset(Dataset):
 
         label = float(
             candidate_idx == gold_idx
-            and leaf_is_candidate
+            and path_has_candidate
             and candidate_has_entity
         )
 

@@ -59,8 +59,13 @@ class EmbInferDataset:
             
             processed_dict_list.append(processed_dict_i)
         self.processed_dict_list = processed_dict_list
+        self._save_filtered_processed(save_path)
         
         print(f'# raw samples: {len(raw_set)} | # processed samples: {len(self.processed_dict_list)}')
+
+    def _save_filtered_processed(self, save_path):
+        with open(save_path, 'wb') as f:
+            pickle.dump(self.processed_dict_list, f)
 
     def _process(
         self,

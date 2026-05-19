@@ -23,7 +23,7 @@ candidate_treescorer:
   heads: 2
   dropout: 0.2
   use_cache: true
-  cache_version: candidate_v1
+  cache_version: candidate_v2
 
 optimizer:
   lr: 1.0e-4
