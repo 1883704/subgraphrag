@@ -102,6 +102,13 @@ def build_dataset(config, split, mode):
         cache_path=cache_path,
         use_cache=tree_config["use_cache"],
         cache_version=tree_config["cache_version"],
+        filter_generic_entities=tree_config.get("filter_generic_entities", False),
+        generic_entity_stoplist=tree_config.get("generic_entity_stoplist"),
+        min_entity_text_len=tree_config.get("min_entity_text_len", 0),
+        max_entity_degree=tree_config.get("max_entity_degree"),
+        semantic_sort_records=tree_config.get("semantic_sort_records", False),
+        semantic_positive_topk=tree_config.get("semantic_positive_topk", 0),
+        semantic_positive_min_score=tree_config.get("semantic_positive_min_score"),
     )
 
 

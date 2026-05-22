@@ -1,15 +1,58 @@
 import os
 import random
+import re
 from collections import deque
 
 import networkx as nx
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
 
 LABEL_TO_INDEX = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+DEFAULT_GENERIC_ENTITY_STOPLIST = {
+    "all",
+    "patient",
+    "patients",
+    "disease",
+    "diseases",
+    "medicine",
+    "medical",
+    "treatment",
+    "therapy",
+    "drug",
+    "drugs",
+    "human",
+    "normal",
+    "abnormal",
+    "positive",
+    "negative",
+    "clinical",
+    "surgery",
+    "procedure",
+    "syndrome",
+    "disorder",
+    "condition",
+    "finding",
+    "symptom",
+    "sign",
+    "test",
+    "diagnosis",
+    "management",
+    "cause",
+    "risk",
+    "factor",
+    "complication",
+    "effect",
+    "unknown",
+    "various",
+    "multiple",
+    "common",
+    "rare",
+}
 
 
 def _normalize_options(sample):
@@ -31,6 +74,13 @@ def _normalize_options(sample):
         if label and text:
             normalized.append((label, text))
     return normalized
+
+
+def _normalize_entity_text(text):
+    text = str(text or "").lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return text.strip()
 
 
 def _gold_index(sample, label_base="zero"):
@@ -93,6 +143,13 @@ class CandidateTreeScorerDataset(Dataset):
         cache_path=None,
         use_cache=True,
         cache_version="candidate_v2",
+        filter_generic_entities=False,
+        generic_entity_stoplist=None,
+        min_entity_text_len=0,
+        max_entity_degree=None,
+        semantic_sort_records=False,
+        semantic_positive_topk=0,
+        semantic_positive_min_score=None,
     ):
         self.emb_dict = emb_dict
         self.max_hops = max_hops
@@ -108,6 +165,20 @@ class CandidateTreeScorerDataset(Dataset):
         self.cache_path = cache_path
         self.use_cache = use_cache
         self.cache_version = cache_version
+        self.filter_generic_entities = filter_generic_entities
+        self.generic_entity_stoplist = {
+            _normalize_entity_text(entity)
+            for entity in (
+                generic_entity_stoplist
+                if generic_entity_stoplist is not None
+                else DEFAULT_GENERIC_ENTITY_STOPLIST
+            )
+        }
+        self.min_entity_text_len = int(min_entity_text_len or 0)
+        self.max_entity_degree = max_entity_degree
+        self.semantic_sort_records = semantic_sort_records
+        self.semantic_positive_topk = int(semantic_positive_topk or 0)
+        self.semantic_positive_min_score = semantic_positive_min_score
 
         self.data_list = []
         self.qid2indices = {}
@@ -135,6 +206,13 @@ class CandidateTreeScorerDataset(Dataset):
             "label_base": self.label_base,
             "num_options": self.num_options,
             "mode": self.mode,
+            "filter_generic_entities": self.filter_generic_entities,
+            "generic_entity_stoplist": sorted(self.generic_entity_stoplist),
+            "min_entity_text_len": self.min_entity_text_len,
+            "max_entity_degree": self.max_entity_degree,
+            "semantic_sort_records": self.semantic_sort_records,
+            "semantic_positive_topk": self.semantic_positive_topk,
+            "semantic_positive_min_score": self.semantic_positive_min_score,
         }
 
     def _maybe_load_cache(self):
@@ -177,6 +255,9 @@ class CandidateTreeScorerDataset(Dataset):
         raw_paths = 0
         support_pos = 0
         support_total = 0
+        filtered_generic_paths = 0
+        filtered_degree_paths = 0
+        semantic_positive_candidates = 0
 
         for sample_idx, sample in enumerate(tqdm(raw_samples)):
             sample_id = sample["id"]
@@ -207,20 +288,29 @@ class CandidateTreeScorerDataset(Dataset):
             local_ent_embs = sample_embs["entity_embs"].cpu()
             local_rel_embs = sample_embs["relation_embs"].cpu()
 
-            num_entities = len(sample.get("text_entity_list", [])) + len(
+            entity_list = list(sample.get("text_entity_list", [])) + list(
                 sample.get("non_text_entity_list", [])
             )
+            num_entities = len(entity_list)
             local_ent_embs = self._pad_non_text_entity_embs(
                 local_ent_embs, num_entities, q_emb.shape[-1]
             )
 
             nx_g = self._build_nx_graph(sample)
+            node_degrees = self._node_degrees(sample)
             root_ids = sample.get("q_entity_id_list", [])
             if not root_ids:
                 continue
 
             option_entity_id_lists = self._option_entity_id_lists(sample, options)
             question_path_records = self._enumerate_paths_from_roots(nx_g, root_ids)
+            question_path_records, filter_stats = self._filter_path_records(
+                question_path_records,
+                entity_list,
+                node_degrees,
+            )
+            filtered_generic_paths += filter_stats["generic"]
+            filtered_degree_paths += filter_stats["degree"]
             raw_paths += len(question_path_records)
 
             start_idx = len(self.data_list)
@@ -230,22 +320,36 @@ class CandidateTreeScorerDataset(Dataset):
                     nx_g,
                     sorted(candidate_entity_ids),
                 )
+                candidate_path_records, filter_stats = self._filter_path_records(
+                    candidate_path_records,
+                    entity_list,
+                    node_degrees,
+                )
+                filtered_generic_paths += filter_stats["generic"]
+                filtered_degree_paths += filter_stats["degree"]
                 path_records = self._dedupe_records(
                     question_path_records + candidate_path_records
                 )
                 raw_paths += len(candidate_path_records)
+                candidate_emb = option_embs[candidate_idx].view(1, -1)
                 selected_records = self._select_records_for_candidate(
                     path_records,
                     candidate_entity_ids,
                     candidate_idx,
                     gold_idx,
+                    q_emb=q_emb,
+                    candidate_emb=candidate_emb,
+                    local_ent_embs=local_ent_embs,
+                    local_rel_embs=local_rel_embs,
+                )
+                semantic_positive_candidates += int(
+                    any(record.get("semantic_selected_positive", False) for record in selected_records)
                 )
                 if not selected_records:
                     selected_records = [
                         self._null_record(root_ids[0], sample.get("a_entity_id_list", []))
                     ]
 
-                candidate_emb = option_embs[candidate_idx].view(1, -1)
                 for record in selected_records:
                     data = self._path_to_data(
                         record,
@@ -278,6 +382,9 @@ class CandidateTreeScorerDataset(Dataset):
             "support_pos": support_pos,
             "support_total": support_total,
             "support_pos_ratio": support_pos / max(support_total, 1),
+            "filtered_generic_paths": filtered_generic_paths,
+            "filtered_degree_paths": filtered_degree_paths,
+            "semantic_positive_candidates": semantic_positive_candidates,
         }
         print(f"[CandidateTreeGen] stats={self.stats}")
 
@@ -311,12 +418,81 @@ class CandidateTreeScorerDataset(Dataset):
             for label, _ in options
         ]
 
+    def _node_degrees(self, sample):
+        degrees = {}
+        for h_id, t_id in zip(sample.get("h_id_list", []), sample.get("t_id_list", [])):
+            degrees[h_id] = degrees.get(h_id, 0) + 1
+            degrees[t_id] = degrees.get(t_id, 0) + 1
+        return degrees
+
+    def _is_generic_entity(self, node_id, entity_list):
+        if node_id < 0 or node_id >= len(entity_list):
+            return True
+        text = _normalize_entity_text(entity_list[node_id])
+        if not text:
+            return True
+        if self.min_entity_text_len and len(text) <= self.min_entity_text_len:
+            return True
+        return text in self.generic_entity_stoplist
+
+    def _filter_path_records(self, records, entity_list, node_degrees):
+        if not records:
+            return records, {"generic": 0, "degree": 0}
+
+        filtered = []
+        stats = {"generic": 0, "degree": 0}
+        for record in records:
+            nodes = record.get("path_nodes", [])
+            if self.filter_generic_entities and any(
+                self._is_generic_entity(node_id, entity_list) for node_id in nodes
+            ):
+                stats["generic"] += 1
+                continue
+            if self.max_entity_degree is not None and any(
+                node_degrees.get(node_id, 0) > self.max_entity_degree for node_id in nodes
+            ):
+                stats["degree"] += 1
+                continue
+            filtered.append(record)
+
+        return filtered, stats
+
+    def _record_semantic_score(
+        self,
+        record,
+        q_emb,
+        candidate_emb,
+        local_ent_embs,
+        local_rel_embs,
+    ):
+        node_ids = record.get("path_nodes", [])
+        rel_ids = record.get("path_rel_ids", [])
+        vectors = []
+        if node_ids:
+            node_tensor = torch.tensor(node_ids, dtype=torch.long)
+            if int(node_tensor.max().item()) < local_ent_embs.shape[0]:
+                vectors.append(local_ent_embs[node_tensor].mean(dim=0))
+        if rel_ids:
+            rel_tensor = torch.tensor(rel_ids, dtype=torch.long)
+            if int(rel_tensor.max().item()) < local_rel_embs.shape[0]:
+                vectors.append(local_rel_embs[rel_tensor].mean(dim=0))
+        if not vectors:
+            return 0.0
+
+        path_vec = torch.stack(vectors).mean(dim=0).view(1, -1)
+        target_vec = (q_emb.view(1, -1) + candidate_emb.view(1, -1)) / 2
+        return float(F.cosine_similarity(path_vec, target_vec, dim=-1).item())
+
     def _select_records_for_candidate(
         self,
         path_records,
         candidate_entity_ids,
         candidate_idx,
         gold_idx,
+        q_emb=None,
+        candidate_emb=None,
+        local_ent_embs=None,
+        local_rel_embs=None,
     ):
         if not path_records:
             return []
@@ -325,6 +501,24 @@ class CandidateTreeScorerDataset(Dataset):
         anchored = []
         other_negatives = []
         for record in path_records:
+            record = dict(record)
+            if (
+                self.semantic_sort_records
+                and q_emb is not None
+                and candidate_emb is not None
+                and local_ent_embs is not None
+                and local_rel_embs is not None
+            ):
+                record["semantic_score"] = self._record_semantic_score(
+                    record,
+                    q_emb,
+                    candidate_emb,
+                    local_ent_embs,
+                    local_rel_embs,
+                )
+            else:
+                record["semantic_score"] = 0.0
+
             path_nodes = set(record["path_nodes"])
             leaf_is_candidate = record["leaf_id"] in candidate_entity_ids
             path_has_candidate = bool(path_nodes & candidate_entity_ids)
@@ -333,16 +527,41 @@ class CandidateTreeScorerDataset(Dataset):
                 and path_has_candidate
                 and bool(candidate_entity_ids)
             )
+            if (
+                is_positive
+                and self.semantic_positive_min_score is not None
+                and record["semantic_score"] < self.semantic_positive_min_score
+            ):
+                is_positive = False
+
             if is_positive:
+                record["support_label"] = 1.0
                 positives.append(record)
             elif path_has_candidate or leaf_is_candidate:
+                record["support_label"] = 0.0
                 anchored.append(record)
             else:
+                record["support_label"] = 0.0
                 other_negatives.append(record)
 
+        if self.semantic_sort_records:
+            positives.sort(key=lambda item: item.get("semantic_score", 0.0), reverse=True)
+            anchored.sort(key=lambda item: item.get("semantic_score", 0.0), reverse=True)
+            other_negatives.sort(key=lambda item: item.get("semantic_score", 0.0), reverse=True)
+
         if self.mode == "train":
+            if self.semantic_positive_topk > 0:
+                positives = positives[: self.semantic_positive_topk]
+                for record in positives:
+                    record["semantic_selected_positive"] = True
+            elif len(positives) > self.max_pos_per_candidate:
+                if self.semantic_sort_records:
+                    positives = positives[: self.max_pos_per_candidate]
+                else:
+                    positives = random.sample(positives, self.max_pos_per_candidate)
+
             if len(positives) > self.max_pos_per_candidate:
-                positives = random.sample(positives, self.max_pos_per_candidate)
+                positives = positives[: self.max_pos_per_candidate]
             selected = list(positives)
 
             hard_budget = min(
@@ -350,13 +569,19 @@ class CandidateTreeScorerDataset(Dataset):
                 max(self.max_paths_per_candidate - len(selected), 0),
             )
             if len(anchored) > hard_budget:
-                selected.extend(random.sample(anchored, hard_budget))
+                if self.semantic_sort_records:
+                    selected.extend(anchored[:hard_budget])
+                else:
+                    selected.extend(random.sample(anchored, hard_budget))
             else:
                 selected.extend(anchored)
 
             budget = max(self.max_paths_per_candidate - len(selected), 0)
             if len(other_negatives) > budget:
-                selected.extend(random.sample(other_negatives, budget))
+                if self.semantic_sort_records:
+                    selected.extend(other_negatives[:budget])
+                else:
+                    selected.extend(random.sample(other_negatives, budget))
             else:
                 selected.extend(other_negatives[:budget])
             return selected
@@ -579,11 +804,14 @@ class CandidateTreeScorerDataset(Dataset):
             1.0 if candidate_has_entity else 0.0,
         ]], dtype=torch.float)
 
-        label = float(
-            candidate_idx == gold_idx
-            and path_has_candidate
-            and candidate_has_entity
-        )
+        label = float(record.get(
+            "support_label",
+            float(
+                candidate_idx == gold_idx
+                and path_has_candidate
+                and candidate_has_entity
+            ),
+        ))
 
         return Data(
             x=x,
