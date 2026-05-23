@@ -17,7 +17,6 @@ import argparse
 import csv
 import hashlib
 import json
-import math
 import os
 import statistics
 from pathlib import Path
@@ -300,6 +299,29 @@ def gate_specs() -> list[dict[str, Any]]:
     ]
 
 
+def gate_spec_by_name(name: str) -> dict[str, Any]:
+    for spec in gate_specs():
+        if spec["name"] == name:
+            return spec
+    valid = ", ".join(spec["name"] for spec in gate_specs())
+    raise ValueError(f"Unknown gate strategy: {name}. Valid strategies: {valid}")
+
+
+def parse_fixed_gate(value: str) -> tuple[str, float]:
+    for sep in ("=", ":"):
+        if sep in value:
+            name, threshold = value.split(sep, 1)
+            return name.strip(), float(threshold.strip())
+    raise ValueError(
+        f"Invalid fixed gate '{value}'. Use STRATEGY:THRESHOLD, "
+        "for example tree_top_score:0.58"
+    )
+
+
+def safe_name(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)
+
+
 def chooser_for(spec: dict[str, Any], threshold: float) -> Callable[[dict[str, Any]], str]:
     feature = spec["feature"]
     requires = spec.get("requires")
@@ -373,6 +395,39 @@ def cross_validate(rows: list[dict[str, Any]], folds: int) -> list[dict[str, Any
             }
         )
     results.sort(key=lambda row: (row["cv_accuracy"], -row["cv_tree_used_ratio"]), reverse=True)
+    return results
+
+
+def evaluate_fixed_gates(
+    rows: list[dict[str, Any]],
+    fixed_gates: list[str],
+    out_dir: Path,
+    name: str,
+    gold: dict[str, Any],
+    numeric_base: str,
+) -> list[dict[str, Any]]:
+    results = []
+    for raw_gate in fixed_gates:
+        strategy, threshold = parse_fixed_gate(raw_gate)
+        spec = gate_spec_by_name(strategy)
+        result = accuracy(rows, chooser_for(spec, threshold))
+        pred_path = out_dir / f"{name}_fixed_{safe_name(strategy)}_{threshold:g}_routed_predictions.jsonl"
+        write_routed_predictions(pred_path, result["routed_rows"])
+        eval_result = evaluate_file(str(pred_path), gold, numeric_base)
+        results.append(
+            {
+                "strategy": strategy,
+                "threshold": threshold,
+                "correct": result["correct"],
+                "accuracy": result["accuracy"],
+                "tree_used": result["tree_used"],
+                "tree_used_ratio": result["tree_used_ratio"],
+                "routed_eval_correct": eval_result["correct"],
+                "routed_eval_accuracy": eval_result["accuracy"],
+                "routed_pred_file": str(pred_path),
+            }
+        )
+    results.sort(key=lambda row: (row["accuracy"], -row["tree_used_ratio"]), reverse=True)
     return results
 
 
@@ -488,6 +543,15 @@ def main() -> None:
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--name", default="evidence_gate")
     parser.add_argument("--out-dir", default="results/gating")
+    parser.add_argument(
+        "--fixed-gate",
+        action="append",
+        default=[],
+        help=(
+            "Evaluate a fixed gate in STRATEGY:THRESHOLD format. "
+            "Can be repeated. Example: --fixed-gate tree_top_score:0.58"
+        ),
+    )
     args = parser.parse_args()
 
     args.raw_path = args.raw_path or default_raw_path(args.dataset_name, args.split)
@@ -510,6 +574,14 @@ def main() -> None:
     best["routed_pred_file"] = str(routed_path)
     best["routed_eval_correct"] = eval_result["correct"]
     best["routed_eval_accuracy"] = eval_result["accuracy"]
+    fixed = evaluate_fixed_gates(
+        records,
+        args.fixed_gate,
+        out_dir,
+        args.name,
+        gold,
+        numeric_base,
+    )
 
     all_rows = []
     for row in baselines:
@@ -517,6 +589,8 @@ def main() -> None:
         copied.update(row)
         all_rows.append(copied)
     all_rows.append({"group": "best_all", **best})
+    for row in fixed:
+        all_rows.append({"group": "fixed_gate", **row})
     for row in cv:
         all_rows.append({"group": "cross_validation", **row})
 
@@ -538,6 +612,10 @@ def main() -> None:
         "## Best Gate Fitted On All Rows",
         "",
         md_table([best], ["strategy", "threshold", "correct", "accuracy", "tree_used", "tree_used_ratio", "routed_eval_correct", "routed_eval_accuracy"]),
+        "",
+        "## Fixed Gates",
+        "",
+        md_table(fixed, ["strategy", "threshold", "correct", "accuracy", "tree_used", "tree_used_ratio", "routed_eval_correct", "routed_eval_accuracy", "routed_pred_file"]),
         "",
         "## Cross-Validated Gates",
         "",
