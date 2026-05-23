@@ -210,3 +210,43 @@ mcq_cot_prompt = (
     "Choose exactly one option from A, B, C, or D. "
     "Return only one line in this exact format: ans: A, ans: B, ans: C, or ans: D."
 )
+
+
+mcq_gate_sys_prompt = (
+    "You are answering a four-option single-answer medical question. "
+    "The question includes options A, B, C, and D. "
+    "Reasoning trees from a medical knowledge graph may be provided, but they are noisy. "
+    "Use a reasoning tree only when it directly supports or rules out an option. "
+    "Ignore trees built from generic entities such as all, disease, symptom, disorder, patient, or person. "
+    "Ignore evidence that is only loosely related to the question topic or only repeats an option without a useful relation. "
+    "If the trees are incomplete, generic, contradictory, or clinically irrelevant, rely on the question and your medical knowledge. "
+    "Choose exactly one option from A, B, C, or D. "
+    "Return only one line in this exact format: ans: <letter>. "
+    "Do not explain. Do not output option text. Do not output any other characters."
+)
+
+
+mcq_gate_cot_prompt = (
+    "Decide whether the provided reasoning trees are clinically relevant. "
+    "Then choose exactly one option from A, B, C, or D. "
+    "Return only one line in this exact format: ans: A, ans: B, ans: C, or ans: D."
+)
+
+
+mcq_compare_sys_prompt = (
+    "You are answering a four-option single-answer medical question. "
+    "The question includes options A, B, C, and D. "
+    "Compare the four option texts against the question first. "
+    "Then use the provided reasoning trees only as supporting evidence when their entities and relations are specific to the option being evaluated. "
+    "Treat generic or hub-like evidence as low confidence. "
+    "Do not let irrelevant knowledge-graph paths override clear medical knowledge. "
+    "Choose exactly one option from A, B, C, or D. "
+    "Return only one line in this exact format: ans: <letter>. "
+    "Do not explain. Do not output option text. Do not output any other characters."
+)
+
+
+mcq_compare_cot_prompt = (
+    "Compare options A, B, C, and D, using reasoning trees only if they are specific and relevant. "
+    "Return only one line in this exact format: ans: A, ans: B, ans: C, or ans: D."
+)

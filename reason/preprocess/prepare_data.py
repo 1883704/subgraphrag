@@ -312,6 +312,9 @@ def get_data(dataset_name, pred_file_path, score_dict_path, split, prompt_mode, 
         data = add_scored_trees(data, score_dict_path)
         return data
 
+    if 'noevi' in prompt_mode:
+        return data
+
     if 'rog' in prompt_mode:
         data = add_good_triplets_from_rog(data)
     data = add_scored_triplets(data, score_dict_path, prompt_mode)

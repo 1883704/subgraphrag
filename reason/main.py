@@ -15,7 +15,13 @@ from metrics.evaluate_results import eval_results as eval_results_original
 
 
 def get_defined_prompts(prompt_mode, model_name, llm_mode, llm_backend="auto"):
-    if 'mcq' in prompt_mode:
+    if 'compare_mcq' in prompt_mode:
+        from prompts import mcq_compare_sys_prompt, mcq_compare_cot_prompt
+        return mcq_compare_sys_prompt, mcq_compare_cot_prompt
+    elif 'gate_mcq' in prompt_mode:
+        from prompts import mcq_gate_sys_prompt, mcq_gate_cot_prompt
+        return mcq_gate_sys_prompt, mcq_gate_cot_prompt
+    elif 'mcq' in prompt_mode:
         from prompts import mcq_sys_prompt, mcq_cot_prompt
         return mcq_sys_prompt, mcq_cot_prompt
     elif is_api_backend(llm_backend, model_name) or 'gpt' in prompt_mode:
@@ -165,6 +171,7 @@ def main():
     parser.add_argument("--max_samples", "--max-samples", type=int, default=None, help="Run only the first N samples for smoke tests.")
     parser.add_argument("--wandb_mode", "--wandb-mode", choices=["online", "offline", "disabled"], default=None, help="Override wandb mode.")
     parser.add_argument("--run_name", "--run-name", type=str, default=None, help="Optional wandb run name.")
+    parser.add_argument("--output_tag", "--output-tag", type=str, default=None, help="Optional filename tag for prediction outputs.")
     # parser.add_argument("--model_name", type=str, default="gpt-4o", help="Model name")
     parser.add_argument("--split", type=str, default="test", help="Split")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Tensor parallel size")
@@ -219,7 +226,9 @@ def main():
     run = wandb.init(**wandb_kwargs)
 
     if args.score_dict_path is None:
-        if "tree" in prompt_mode:
+        if "noevi" in prompt_mode:
+            score_dict_path = None
+        elif "tree" in prompt_mode:
             raise ValueError("Tree prompt modes require -p/--score_dict_path to point to tree_retrieval_result.jsonl or .pth")
         elif dataset_name == "webqsp":
             assert split == "test"
@@ -238,7 +247,8 @@ def main():
     raw_pred_folder_path = Path(f"./results/KGQA/{dataset_name}/SubgraphRAG/{safe_run_component(args.model_name)}")
     raw_pred_folder_path.mkdir(parents=True, exist_ok=True)
     sample_suffix = f"-first_{args.max_samples}" if args.max_samples else ""
-    raw_pred_file_path = raw_pred_folder_path / f"{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}{sample_suffix}-predictions-resume.jsonl"
+    tag_suffix = f"-{safe_run_component(args.output_tag)}" if args.output_tag else ""
+    raw_pred_file_path = raw_pred_folder_path / f"{prompt_mode}-{llm_mode}-{frequency_penalty}-thres_{thres}-{split}{sample_suffix}{tag_suffix}-predictions-resume.jsonl"
 
     llm = llm_init(
         model_name,
